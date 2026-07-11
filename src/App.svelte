@@ -7,6 +7,9 @@
   import Images from "./lib/Images.svelte";
   import Volumes from "./lib/Volumes.svelte";
   import Networks from "./lib/Networks.svelte";
+  import Stats from "./lib/Stats.svelte";
+  import Events from "./lib/Events.svelte";
+  import Maintenance from "./lib/Maintenance.svelte";
 
   let hosts = $state<Host[]>([]);
   let hostId = $state("local");
@@ -27,17 +30,23 @@
   const NAV: { id: View; label: string; ico: string }[] = [
     { id: "dashboard", label: "Dashboard", ico: "◉" },
     { id: "containers", label: "Container", ico: "▤" },
+    { id: "stats", label: "Live Stats", ico: "◧" },
     { id: "images", label: "Immagini", ico: "◈" },
     { id: "volumes", label: "Volumi", ico: "⛁" },
     { id: "networks", label: "Reti", ico: "⇄" },
+    { id: "events", label: "Eventi", ico: "⧗" },
+    { id: "maintenance", label: "Manutenzione", ico: "⚑" },
   ];
 
   const titles: Record<View, string> = {
     dashboard: "Dashboard",
     containers: "Container",
+    stats: "Live Stats",
     images: "Immagini",
     volumes: "Volumi",
     networks: "Reti",
+    events: "Eventi",
+    maintenance: "Manutenzione",
   };
 
   const hostName = $derived(
@@ -47,9 +56,12 @@
   const subtitles = $derived<Record<View, string>>({
     dashboard: "Panoramica di tutti i tuoi host Docker",
     containers: `Container su ${hostName}`,
+    stats: `Utilizzo risorse in tempo reale · ${hostName}`,
     images: `Immagini su ${hostName}`,
     volumes: `Volumi su ${hostName}`,
     networks: `Reti su ${hostName}`,
+    events: `Timeline eventi Docker · ${hostName}`,
+    maintenance: `Disk usage e pulizia · ${hostName}`,
   });
 
   const avatar = $derived((hostName?.[0] ?? "D").toUpperCase());
@@ -137,7 +149,7 @@
 
         <div class="side-foot">
           <b>{hosts.length}</b> host configurati<br />
-          DockOne · v0.1.0
+          DockOne · v0.2.0
         </div>
       </aside>
 
@@ -152,12 +164,18 @@
             <Dashboard {query} />
           {:else if view === "containers"}
             <Containers {hostId} {query} {settings} onSettings={(s) => (settings = s)} />
+          {:else if view === "stats"}
+            <Stats {hostId} {query} />
           {:else if view === "images"}
             <Images {hostId} {query} />
           {:else if view === "volumes"}
             <Volumes {hostId} {query} />
           {:else if view === "networks"}
             <Networks {hostId} {query} />
+          {:else if view === "events"}
+            <Events {hostId} {query} />
+          {:else if view === "maintenance"}
+            <Maintenance {hostId} />
           {/if}
         {/key}
       </main>

@@ -8,6 +8,8 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
 
+  let busy = $state<Record<string, boolean>>({});
+
   async function load() {
     loading = true;
     error = null;
@@ -24,6 +26,19 @@
     hostId;
     load();
   });
+
+  async function remove(name: string) {
+    if (!confirm(`Rimuovere il volume ${name}?`)) return;
+    busy = { ...busy, [name]: true };
+    try {
+      await api.removeVolume(hostId, name);
+      await load();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = { ...busy, [name]: false };
+    }
+  }
 
   const filtered = $derived(
     items.filter((v) =>
@@ -45,6 +60,7 @@
           <th>Nome</th>
           <th>Driver</th>
           <th>Mountpoint</th>
+          <th style="text-align:right">Azioni</th>
         </tr>
       </thead>
       <tbody>
@@ -53,6 +69,9 @@
             <td class="row-title">{v.name}</td>
             <td class="mono">{v.driver}</td>
             <td class="mono">{v.mountpoint}</td>
+            <td style="text-align:right">
+              <button class="act danger" disabled={busy[v.name]} onclick={() => remove(v.name)}>Rimuovi</button>
+            </td>
           </tr>
         {/each}
       </tbody>

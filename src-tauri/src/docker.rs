@@ -8,6 +8,7 @@ use bollard::container::{
 };
 use bollard::image::ListImagesOptions;
 use bollard::Docker;
+use futures_util::future::join_all;
 use futures_util::StreamExt;
 use serde::Serialize;
 
@@ -70,6 +71,10 @@ pub struct ContainerDto {
     pub status: String,
     pub ports: Vec<String>,
     pub created: i64,
+    /// healthy | unhealthy | starting | none (parsed from the status line)
+    pub health: String,
+    /// docker-compose project name, if the container belongs to a stack
+    pub compose: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -164,6 +169,12 @@ pub async fn list_containers(docker: &Docker) -> Result<Vec<ContainerDto>, Strin
                 })
                 .collect::<Vec<_>>();
 
+            let status = c.status.unwrap_or_default();
+            let compose = c
+                .labels
+                .as_ref()
+                .and_then(|m| m.get("com.docker.compose.project").cloned());
+
             ContainerDto {
                 id: c.id.unwrap_or_default(),
                 name: c
@@ -173,9 +184,11 @@ pub async fn list_containers(docker: &Docker) -> Result<Vec<ContainerDto>, Strin
                     .unwrap_or_default(),
                 image: c.image.unwrap_or_default(),
                 state: c.state.unwrap_or_default(),
-                status: c.status.unwrap_or_default(),
+                health: parse_health(&status),
+                status,
                 ports,
                 created: c.created.unwrap_or(0),
+                compose,
             }
         })
         .collect();
@@ -278,6 +291,370 @@ pub async fn container_logs(docker: &Docker, id: &str, tail: &str) -> Result<Str
 pub async fn inspect_container(docker: &Docker, id: &str) -> Result<serde_json::Value, String> {
     let details = docker.inspect_container(id, None).await.map_err(err)?;
     serde_json::to_value(details).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Live stats
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StatDto {
+    pub id: String,
+    pub name: String,
+    pub cpu_percent: f64,
+    pub mem_used: i64,
+    pub mem_limit: i64,
+    pub mem_percent: f64,
+    pub net_rx: i64,
+    pub net_tx: i64,
+    pub blk_read: i64,
+    pub blk_write: i64,
+}
+
+pub async fn container_stats(docker: &Docker) -> Result<Vec<StatDto>, String> {
+    let opts = ListContainersOptions::<String> {
+        all: false,
+        ..Default::default()
+    };
+    let list = docker.list_containers(Some(opts)).await.map_err(err)?;
+    let targets: Vec<(String, String)> = list
+        .into_iter()
+        .filter_map(|c| {
+            let id = c.id?;
+            let name = c
+                .names
+                .and_then(|n| n.into_iter().next())
+                .map(|n| n.trim_start_matches('/').to_string())
+                .unwrap_or_default();
+            Some((id, name))
+        })
+        .collect();
+
+    let futs = targets.into_iter().map(|(id, name)| {
+        let docker = docker.clone();
+        async move { one_stat(&docker, &id, &name).await }
+    });
+    Ok(join_all(futs).await.into_iter().flatten().collect())
+}
+
+async fn one_stat(docker: &Docker, id: &str, name: &str) -> Option<StatDto> {
+    use bollard::container::StatsOptions;
+    let mut stream = docker.stats(
+        id,
+        Some(StatsOptions {
+            stream: true,
+            one_shot: false,
+        }),
+    );
+    // The first frame has an empty precpu snapshot; read a second frame so the
+    // CPU delta is meaningful.
+    let mut last = None;
+    for _ in 0..2 {
+        match stream.next().await {
+            Some(Ok(s)) => last = Some(s),
+            _ => break,
+        }
+    }
+    let s = last?;
+
+    let cpu_delta =
+        s.cpu_stats.cpu_usage.total_usage as f64 - s.precpu_stats.cpu_usage.total_usage as f64;
+    let sys_delta = s.cpu_stats.system_cpu_usage.unwrap_or(0) as f64
+        - s.precpu_stats.system_cpu_usage.unwrap_or(0) as f64;
+    let cpus = s
+        .cpu_stats
+        .online_cpus
+        .or_else(|| {
+            s.cpu_stats
+                .cpu_usage
+                .percpu_usage
+                .as_ref()
+                .map(|v| v.len() as u64)
+        })
+        .unwrap_or(1) as f64;
+    let cpu_percent = if sys_delta > 0.0 && cpu_delta > 0.0 {
+        (cpu_delta / sys_delta) * cpus * 100.0
+    } else {
+        0.0
+    };
+
+    let mem_used = s.memory_stats.usage.unwrap_or(0) as i64;
+    let mem_limit = s.memory_stats.limit.unwrap_or(0) as i64;
+    let mem_percent = if mem_limit > 0 {
+        mem_used as f64 / mem_limit as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    let (mut rx, mut tx) = (0i64, 0i64);
+    if let Some(nets) = &s.networks {
+        for n in nets.values() {
+            rx += n.rx_bytes as i64;
+            tx += n.tx_bytes as i64;
+        }
+    }
+    let (mut br, mut bw) = (0i64, 0i64);
+    if let Some(entries) = &s.blkio_stats.io_service_bytes_recursive {
+        for e in entries {
+            match e.op.to_lowercase().as_str() {
+                "read" => br += e.value as i64,
+                "write" => bw += e.value as i64,
+                _ => {}
+            }
+        }
+    }
+
+    Some(StatDto {
+        id: id.chars().take(12).collect(),
+        name: name.to_string(),
+        cpu_percent,
+        mem_used,
+        mem_limit,
+        mem_percent,
+        net_rx: rx,
+        net_tx: tx,
+        blk_read: br,
+        blk_write: bw,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Events timeline
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventDto {
+    pub time: i64,
+    pub kind: String,
+    pub action: String,
+    pub actor: String,
+}
+
+pub async fn recent_events(docker: &Docker, since: i64, until: i64) -> Result<Vec<EventDto>, String> {
+    use bollard::system::EventsOptions;
+    let opts = EventsOptions::<String> {
+        since: Some(since.to_string()),
+        until: Some(until.to_string()),
+        filters: Default::default(),
+    };
+    let mut stream = docker.events(Some(opts));
+    let mut out = Vec::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(ev) => {
+                let actor = ev
+                    .actor
+                    .as_ref()
+                    .and_then(|a| a.attributes.as_ref())
+                    .and_then(|m| m.get("name").cloned())
+                    .or_else(|| {
+                        ev.actor
+                            .as_ref()
+                            .and_then(|a| a.id.clone())
+                            .map(|i| i.chars().take(12).collect())
+                    })
+                    .unwrap_or_default();
+                out.push(EventDto {
+                    time: ev.time.unwrap_or(0),
+                    kind: ev
+                        .typ
+                        .map(|t| format!("{t:?}").to_lowercase())
+                        .unwrap_or_default(),
+                    action: ev.action.unwrap_or_default(),
+                    actor,
+                });
+            }
+            Err(_) => break,
+        }
+    }
+    out.reverse(); // newest first
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Disk usage + prune
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DfDto {
+    pub images_size: i64,
+    pub images_count: i64,
+    pub volumes_size: i64,
+    pub volumes_count: i64,
+    pub containers_count: i64,
+}
+
+pub async fn system_df(docker: &Docker) -> Result<DfDto, String> {
+    let d = docker.df().await.map_err(err)?;
+    let images = d.images.unwrap_or_default();
+    let volumes = d.volumes.unwrap_or_default();
+    let volumes_size: i64 = volumes
+        .iter()
+        .filter_map(|v| v.usage_data.as_ref().map(|u| u.size))
+        .sum();
+    let containers = d.containers.unwrap_or_default();
+    Ok(DfDto {
+        images_size: d.layers_size.unwrap_or(0),
+        images_count: images.len() as i64,
+        volumes_size,
+        volumes_count: volumes.len() as i64,
+        containers_count: containers.len() as i64,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PruneResult {
+    pub reclaimed: i64,
+    pub detail: String,
+}
+
+pub async fn prune(docker: &Docker, kind: &str) -> Result<PruneResult, String> {
+    match kind {
+        "containers" => {
+            let r = docker
+                .prune_containers(None::<bollard::container::PruneContainersOptions<String>>)
+                .await
+                .map_err(err)?;
+            Ok(PruneResult {
+                reclaimed: r.space_reclaimed.unwrap_or(0),
+                detail: format!("{} container rimossi", r.containers_deleted.unwrap_or_default().len()),
+            })
+        }
+        "images" => {
+            let r = docker
+                .prune_images(None::<bollard::image::PruneImagesOptions<String>>)
+                .await
+                .map_err(err)?;
+            Ok(PruneResult {
+                reclaimed: r.space_reclaimed.unwrap_or(0),
+                detail: format!("{} immagini rimosse", r.images_deleted.unwrap_or_default().len()),
+            })
+        }
+        "volumes" => {
+            let r = docker
+                .prune_volumes(None::<bollard::volume::PruneVolumesOptions<String>>)
+                .await
+                .map_err(err)?;
+            Ok(PruneResult {
+                reclaimed: r.space_reclaimed.unwrap_or(0),
+                detail: format!("{} volumi rimossi", r.volumes_deleted.unwrap_or_default().len()),
+            })
+        }
+        "networks" => {
+            let r = docker
+                .prune_networks(None::<bollard::network::PruneNetworksOptions<String>>)
+                .await
+                .map_err(err)?;
+            Ok(PruneResult {
+                reclaimed: 0,
+                detail: format!("{} reti rimosse", r.networks_deleted.unwrap_or_default().len()),
+            })
+        }
+        other => Err(format!("tipo prune sconosciuto: {other}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Image pull + resource removal + exec
+// ---------------------------------------------------------------------------
+
+pub async fn pull_image(docker: &Docker, image: &str) -> Result<(), String> {
+    use bollard::image::CreateImageOptions;
+    let opts = CreateImageOptions {
+        from_image: image.to_string(),
+        ..Default::default()
+    };
+    let mut stream = docker.create_image(Some(opts), None, None);
+    while let Some(item) = stream.next().await {
+        item.map_err(err)?;
+    }
+    Ok(())
+}
+
+pub async fn remove_image(docker: &Docker, id: &str) -> Result<(), String> {
+    use bollard::image::RemoveImageOptions;
+    docker
+        .remove_image(
+            id,
+            Some(RemoveImageOptions {
+                force: true,
+                ..Default::default()
+            }),
+            None,
+        )
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+
+pub async fn remove_container(docker: &Docker, id: &str) -> Result<(), String> {
+    use bollard::container::RemoveContainerOptions;
+    docker
+        .remove_container(
+            id,
+            Some(RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .map_err(err)
+}
+
+pub async fn remove_volume(docker: &Docker, name: &str) -> Result<(), String> {
+    use bollard::volume::RemoveVolumeOptions;
+    docker
+        .remove_volume(name, Some(RemoveVolumeOptions { force: true }))
+        .await
+        .map_err(err)
+}
+
+pub async fn remove_network(docker: &Docker, id: &str) -> Result<(), String> {
+    docker.remove_network(id).await.map_err(err)
+}
+
+pub async fn exec_run(docker: &Docker, id: &str, cmd: &str) -> Result<String, String> {
+    use bollard::exec::{CreateExecOptions, StartExecOptions, StartExecResults};
+    let exec = docker
+        .create_exec(
+            id,
+            CreateExecOptions {
+                cmd: Some(vec!["/bin/sh", "-c", cmd]),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(err)?;
+
+    let mut out = String::new();
+    if let StartExecResults::Attached { mut output, .. } = docker
+        .start_exec(&exec.id, None::<StartExecOptions>)
+        .await
+        .map_err(err)?
+    {
+        while let Some(item) = output.next().await {
+            match item {
+                Ok(msg) => out.push_str(&String::from_utf8_lossy(&msg.into_bytes())),
+                Err(e) => return Err(err(e)),
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn parse_health(status: &str) -> String {
+    let s = status.to_lowercase();
+    if s.contains("unhealthy") {
+        "unhealthy".into()
+    } else if s.contains("healthy") {
+        "healthy".into()
+    } else if s.contains("health: starting") || s.contains("starting") {
+        "starting".into()
+    } else {
+        "none".into()
+    }
 }
 
 fn err(e: bollard::errors::Error) -> String {

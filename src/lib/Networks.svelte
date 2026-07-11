@@ -8,6 +8,9 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
 
+  let busy = $state<Record<string, boolean>>({});
+  const BUILTIN = ["bridge", "host", "none"];
+
   async function load() {
     loading = true;
     error = null;
@@ -24,6 +27,19 @@
     hostId;
     load();
   });
+
+  async function remove(id: string, name: string) {
+    if (!confirm(`Rimuovere la rete ${name}?`)) return;
+    busy = { ...busy, [id]: true };
+    try {
+      await api.removeNetwork(hostId, id);
+      await load();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = { ...busy, [id]: false };
+    }
+  }
 
   const filtered = $derived(
     items.filter((n) =>
@@ -46,6 +62,7 @@
           <th>Driver</th>
           <th>Scope</th>
           <th>Network ID</th>
+          <th style="text-align:right">Azioni</th>
         </tr>
       </thead>
       <tbody>
@@ -55,6 +72,13 @@
             <td class="mono">{n.driver}</td>
             <td class="mono">{n.scope}</td>
             <td class="mono">{n.id}</td>
+            <td style="text-align:right">
+              {#if BUILTIN.includes(n.name)}
+                <span class="mono">predefinita</span>
+              {:else}
+                <button class="act danger" disabled={busy[n.id]} onclick={() => remove(n.id, n.name)}>Rimuovi</button>
+              {/if}
+            </td>
           </tr>
         {/each}
       </tbody>

@@ -35,6 +35,41 @@ export interface Container {
   status: string;
   ports: string[];
   created: number;
+  health: string;
+  compose: string | null;
+}
+
+export interface Stat {
+  id: string;
+  name: string;
+  cpu_percent: number;
+  mem_used: number;
+  mem_limit: number;
+  mem_percent: number;
+  net_rx: number;
+  net_tx: number;
+  blk_read: number;
+  blk_write: number;
+}
+
+export interface DockerEvent {
+  time: number;
+  kind: string;
+  action: string;
+  actor: string;
+}
+
+export interface Df {
+  images_size: number;
+  images_count: number;
+  volumes_size: number;
+  volumes_count: number;
+  containers_count: number;
+}
+
+export interface PruneResult {
+  reclaimed: number;
+  detail: string;
 }
 
 export interface Image {
@@ -64,4 +99,7 @@ export type View =
   | "containers"
   | "images"
   | "volumes"
-  | "networks";
+  | "networks"
+  | "stats"
+  | "events"
+  | "maintenance";

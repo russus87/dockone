@@ -1,11 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Container,
+  Df,
+  DockerEvent,
   Host,
   HostSummary,
   Image,
   Network,
+  PruneResult,
   Settings,
+  Stat,
   Volume,
 } from "./types";
 
@@ -35,6 +39,24 @@ export const api = {
     invoke<string>("container_logs", { hostId, id, tail }),
   inspectContainer: (hostId: string, id: string) =>
     invoke<unknown>("inspect_container", { hostId, id }),
+
+  containerStats: (hostId: string) => invoke<Stat[]>("container_stats", { hostId }),
+  recentEvents: (hostId: string) => invoke<DockerEvent[]>("recent_events", { hostId }),
+  systemDf: (hostId: string) => invoke<Df>("system_df", { hostId }),
+  prune: (hostId: string, kind: string) =>
+    invoke<PruneResult>("prune", { hostId, kind }),
+  pullImage: (hostId: string, image: string) =>
+    invoke<void>("pull_image", { hostId, image }),
+  removeContainer: (hostId: string, id: string) =>
+    invoke<void>("remove_container", { hostId, id }),
+  removeImage: (hostId: string, id: string) =>
+    invoke<void>("remove_image", { hostId, id }),
+  removeVolume: (hostId: string, name: string) =>
+    invoke<void>("remove_volume", { hostId, name }),
+  removeNetwork: (hostId: string, id: string) =>
+    invoke<void>("remove_network", { hostId, id }),
+  execRun: (hostId: string, id: string, cmd: string) =>
+    invoke<string>("exec_run", { hostId, id, cmd }),
 };
 
 export function humanBytes(n: number): string {

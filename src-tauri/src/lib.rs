@@ -5,7 +5,10 @@ use bollard::Docker;
 use futures_util::future::join_all;
 use tauri::{Manager, State};
 
-use docker::{ContainerDto, HostSummary, ImageDto, NetworkDto, VolumeDto};
+use docker::{
+    ContainerDto, DfDto, EventDto, HostSummary, ImageDto, NetworkDto, PruneResult, StatDto,
+    VolumeDto,
+};
 use state::{AppState, Host, Settings};
 
 // ---------------------------------------------------------------------------
@@ -238,6 +241,82 @@ async fn inspect_container(
     docker::inspect_container(&docker, &id).await
 }
 
+#[tauri::command]
+async fn container_stats(app: tauri::AppHandle, host_id: String) -> Result<Vec<StatDto>, String> {
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::container_stats(&docker).await
+}
+
+#[tauri::command]
+async fn recent_events(app: tauri::AppHandle, host_id: String) -> Result<Vec<EventDto>, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::recent_events(&docker, now - 6 * 3600, now).await
+}
+
+#[tauri::command]
+async fn system_df(app: tauri::AppHandle, host_id: String) -> Result<DfDto, String> {
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::system_df(&docker).await
+}
+
+#[tauri::command]
+async fn prune(app: tauri::AppHandle, host_id: String, kind: String) -> Result<PruneResult, String> {
+    ensure_writable(&app.state::<AppState>())?;
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::prune(&docker, &kind).await
+}
+
+#[tauri::command]
+async fn pull_image(app: tauri::AppHandle, host_id: String, image: String) -> Result<(), String> {
+    ensure_writable(&app.state::<AppState>())?;
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::pull_image(&docker, &image).await
+}
+
+#[tauri::command]
+async fn remove_container(app: tauri::AppHandle, host_id: String, id: String) -> Result<(), String> {
+    ensure_writable(&app.state::<AppState>())?;
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::remove_container(&docker, &id).await
+}
+
+#[tauri::command]
+async fn remove_image(app: tauri::AppHandle, host_id: String, id: String) -> Result<(), String> {
+    ensure_writable(&app.state::<AppState>())?;
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::remove_image(&docker, &id).await
+}
+
+#[tauri::command]
+async fn remove_volume(app: tauri::AppHandle, host_id: String, name: String) -> Result<(), String> {
+    ensure_writable(&app.state::<AppState>())?;
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::remove_volume(&docker, &name).await
+}
+
+#[tauri::command]
+async fn remove_network(app: tauri::AppHandle, host_id: String, id: String) -> Result<(), String> {
+    ensure_writable(&app.state::<AppState>())?;
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::remove_network(&docker, &id).await
+}
+
+#[tauri::command]
+async fn exec_run(
+    app: tauri::AppHandle,
+    host_id: String,
+    id: String,
+    cmd: String,
+) -> Result<String, String> {
+    ensure_writable(&app.state::<AppState>())?;
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::exec_run(&docker, &id, &cmd).await
+}
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
@@ -291,6 +370,16 @@ pub fn run() {
             container_action,
             container_logs,
             inspect_container,
+            container_stats,
+            recent_events,
+            system_df,
+            prune,
+            pull_image,
+            remove_container,
+            remove_image,
+            remove_volume,
+            remove_network,
+            exec_run,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

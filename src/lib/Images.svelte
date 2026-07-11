@@ -7,6 +7,9 @@
   let items = $state<Image[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let pullName = $state("");
+  let pulling = $state(false);
+  let busy = $state<Record<string, boolean>>({});
 
   async function load() {
     loading = true;
@@ -25,6 +28,35 @@
     load();
   });
 
+  async function pull() {
+    const name = pullName.trim();
+    if (!name) return;
+    pulling = true;
+    error = null;
+    try {
+      await api.pullImage(hostId, name);
+      pullName = "";
+      await load();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      pulling = false;
+    }
+  }
+
+  async function remove(i: Image) {
+    if (!confirm(`Rimuovere l'immagine ${i.tags[0] ?? i.id}?`)) return;
+    busy = { ...busy, [i.id]: true };
+    try {
+      await api.removeImage(hostId, i.tags[0] ?? i.id);
+      await load();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = { ...busy, [i.id]: false };
+    }
+  }
+
   const filtered = $derived(
     items.filter((i) => {
       const q = query.trim().toLowerCase();
@@ -35,6 +67,11 @@
 </script>
 
 <div>
+  <div class="host-form" style="margin-bottom:16px">
+    <input placeholder="Pull immagine — es. nginx:latest, ghcr.io/owner/app:tag" bind:value={pullName} onkeydown={(e) => e.key === "Enter" && pull()} />
+    <button class="btn" disabled={pulling} onclick={pull}>{pulling ? "Download…" : "Pull"}</button>
+  </div>
+
   {#if error}<div class="err-banner">{error}</div>{/if}
   {#if loading}
     <div class="loading">Caricamento immagini…</div>
@@ -48,6 +85,7 @@
           <th>Image ID</th>
           <th>Dimensione</th>
           <th>Creata</th>
+          <th style="text-align:right">Azioni</th>
         </tr>
       </thead>
       <tbody>
@@ -63,6 +101,9 @@
             <td class="mono">{i.id}</td>
             <td class="mono">{humanBytes(i.size)}</td>
             <td class="mono">{ago(i.created)}</td>
+            <td style="text-align:right">
+              <button class="act danger" disabled={busy[i.id]} onclick={() => remove(i)}>Rimuovi</button>
+            </td>
           </tr>
         {/each}
       </tbody>
