@@ -9,6 +9,29 @@ export interface Settings {
   theme: "dark" | "light";
   read_only: boolean;
   favorite_containers: string[];
+  alerts_enabled: boolean;
+  alert_poll_secs: number;
+}
+
+export interface PortMap {
+  host: string;
+  container: string;
+  proto: string;
+}
+
+export interface VolMap {
+  host: string;
+  container: string;
+}
+
+export interface DeploySpec {
+  name: string;
+  image: string;
+  cmd: string[];
+  env: string[];
+  ports: PortMap[];
+  volumes: VolMap[];
+  restart: string;
 }
 
 export interface HostSummary {

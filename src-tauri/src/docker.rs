@@ -3,14 +3,16 @@
 //! bollard's model types.
 
 use bollard::container::{
-    ListContainersOptions, LogsOptions, RestartContainerOptions, StartContainerOptions,
-    StopContainerOptions,
+    Config, CreateContainerOptions, ListContainersOptions, LogsOptions, RestartContainerOptions,
+    StartContainerOptions, StopContainerOptions,
 };
 use bollard::image::ListImagesOptions;
+use bollard::models::{HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum};
 use bollard::Docker;
 use futures_util::future::join_all;
 use futures_util::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::state::Host;
 
@@ -263,6 +265,12 @@ pub async fn container_action(docker: &Docker, id: &str, action: &str) -> Result
             .map_err(err),
         "restart" => docker
             .restart_container(id, None::<RestartContainerOptions>)
+            .await
+            .map_err(err),
+        "pause" => docker.pause_container(id).await.map_err(err),
+        "unpause" => docker.unpause_container(id).await.map_err(err),
+        "kill" => docker
+            .kill_container(id, None::<bollard::container::KillContainerOptions<String>>)
             .await
             .map_err(err),
         other => Err(format!("azione sconosciuta: {other}")),
@@ -642,6 +650,177 @@ pub async fn exec_run(docker: &Docker, id: &str, cmd: &str) -> Result<String, St
         }
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Deploy / clone
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PortMap {
+    pub host: String,
+    pub container: String,
+    pub proto: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VolMap {
+    pub host: String,
+    pub container: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeploySpec {
+    pub name: String,
+    pub image: String,
+    pub cmd: Vec<String>,
+    pub env: Vec<String>,
+    pub ports: Vec<PortMap>,
+    pub volumes: Vec<VolMap>,
+    /// no | always | unless-stopped | on-failure
+    pub restart: String,
+}
+
+pub async fn create_container(
+    docker: &Docker,
+    spec: DeploySpec,
+    autostart: bool,
+) -> Result<String, String> {
+    if spec.image.trim().is_empty() {
+        return Err("L'immagine è obbligatoria".into());
+    }
+
+    let mut exposed: HashMap<String, HashMap<(), ()>> = HashMap::new();
+    let mut bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+    for p in &spec.ports {
+        if p.container.trim().is_empty() {
+            continue;
+        }
+        let proto = if p.proto.is_empty() { "tcp" } else { &p.proto };
+        let key = format!("{}/{}", p.container.trim(), proto);
+        exposed.insert(key.clone(), HashMap::new());
+        if !p.host.trim().is_empty() {
+            bindings.insert(
+                key,
+                Some(vec![PortBinding {
+                    host_ip: None,
+                    host_port: Some(p.host.trim().to_string()),
+                }]),
+            );
+        }
+    }
+
+    let binds: Vec<String> = spec
+        .volumes
+        .iter()
+        .filter(|v| !v.host.trim().is_empty() && !v.container.trim().is_empty())
+        .map(|v| format!("{}:{}", v.host.trim(), v.container.trim()))
+        .collect();
+
+    let restart_name = match spec.restart.as_str() {
+        "always" => RestartPolicyNameEnum::ALWAYS,
+        "unless-stopped" => RestartPolicyNameEnum::UNLESS_STOPPED,
+        "on-failure" => RestartPolicyNameEnum::ON_FAILURE,
+        _ => RestartPolicyNameEnum::NO,
+    };
+
+    let host_config = HostConfig {
+        port_bindings: if bindings.is_empty() { None } else { Some(bindings) },
+        binds: if binds.is_empty() { None } else { Some(binds) },
+        restart_policy: Some(RestartPolicy {
+            name: Some(restart_name),
+            maximum_retry_count: None,
+        }),
+        ..Default::default()
+    };
+
+    let config: Config<String> = Config {
+        image: Some(spec.image.trim().to_string()),
+        cmd: if spec.cmd.is_empty() { None } else { Some(spec.cmd.clone()) },
+        env: if spec.env.is_empty() { None } else { Some(spec.env.clone()) },
+        exposed_ports: if exposed.is_empty() { None } else { Some(exposed) },
+        host_config: Some(host_config),
+        ..Default::default()
+    };
+
+    let opts = spec.name.trim().is_empty().then(|| None).unwrap_or_else(|| {
+        Some(CreateContainerOptions {
+            name: spec.name.trim().to_string(),
+            platform: None,
+        })
+    });
+
+    let res = docker.create_container(opts, config).await.map_err(err)?;
+    if autostart {
+        docker
+            .start_container(&res.id, None::<StartContainerOptions<String>>)
+            .await
+            .map_err(err)?;
+    }
+    Ok(res.id)
+}
+
+/// Read an existing container's configuration back into a `DeploySpec` (clone).
+pub async fn container_config(docker: &Docker, id: &str) -> Result<DeploySpec, String> {
+    let d = docker.inspect_container(id, None).await.map_err(err)?;
+    let cfg = d.config.unwrap_or_default();
+    let hc = d.host_config.unwrap_or_default();
+    let name = d
+        .name
+        .unwrap_or_default()
+        .trim_start_matches('/')
+        .to_string();
+
+    let mut ports = Vec::new();
+    if let Some(pb) = hc.port_bindings {
+        for (k, v) in pb {
+            let (cport, proto) = k.split_once('/').unwrap_or((k.as_str(), "tcp"));
+            let host = v
+                .and_then(|vec| vec.into_iter().next())
+                .and_then(|b| b.host_port)
+                .unwrap_or_default();
+            ports.push(PortMap {
+                host,
+                container: cport.to_string(),
+                proto: proto.to_string(),
+            });
+        }
+    }
+
+    let volumes = hc
+        .binds
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|b| {
+            let mut it = b.splitn(2, ':');
+            Some(VolMap {
+                host: it.next()?.to_string(),
+                container: it.next()?.to_string(),
+            })
+        })
+        .collect();
+
+    let restart = hc
+        .restart_policy
+        .and_then(|r| r.name)
+        .map(|n| match n {
+            RestartPolicyNameEnum::ALWAYS => "always",
+            RestartPolicyNameEnum::UNLESS_STOPPED => "unless-stopped",
+            RestartPolicyNameEnum::ON_FAILURE => "on-failure",
+            _ => "no",
+        })
+        .unwrap_or("no")
+        .to_string();
+
+    Ok(DeploySpec {
+        name: format!("{name}-clone"),
+        image: cfg.image.unwrap_or_default(),
+        cmd: cfg.cmd.unwrap_or_default(),
+        env: cfg.env.unwrap_or_default(),
+        ports,
+        volumes,
+        restart,
+    })
 }
 
 fn parse_health(status: &str) -> String {

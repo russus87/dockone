@@ -38,10 +38,19 @@ pub struct Settings {
     /// Container ids/names marked as favorites (any host).
     #[serde(default)]
     pub favorite_containers: Vec<String>,
+    /// Background watcher that notifies on container crashes / unhealthy state.
+    #[serde(default)]
+    pub alerts_enabled: bool,
+    #[serde(default = "default_poll")]
+    pub alert_poll_secs: u64,
 }
 
 fn default_theme() -> String {
     "light".into()
+}
+
+fn default_poll() -> u64 {
+    30
 }
 
 impl Default for Settings {
@@ -50,6 +59,8 @@ impl Default for Settings {
             theme: default_theme(),
             read_only: false,
             favorite_containers: Vec::new(),
+            alerts_enabled: false,
+            alert_poll_secs: default_poll(),
         }
     }
 }
@@ -76,6 +87,8 @@ pub struct AppState {
     pub data: Mutex<PersistedData>,
     /// Cached connections keyed by host id (bollard `Docker` is cheap to clone).
     pub conns: Mutex<HashMap<String, Docker>>,
+    /// Last seen state per `host_id/name`, used by the alerts watcher.
+    pub last_states: Mutex<HashMap<String, String>>,
 }
 
 impl AppState {
@@ -94,6 +107,7 @@ impl AppState {
         AppState {
             data: Mutex::new(data),
             conns: Mutex::new(HashMap::new()),
+            last_states: Mutex::new(HashMap::new()),
         }
     }
 

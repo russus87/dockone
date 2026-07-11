@@ -3,11 +3,12 @@ mod state;
 
 use bollard::Docker;
 use futures_util::future::join_all;
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_notification::NotificationExt;
 
 use docker::{
-    ContainerDto, DfDto, EventDto, HostSummary, ImageDto, NetworkDto, PruneResult, StatDto,
-    VolumeDto,
+    ContainerDto, DeploySpec, DfDto, EventDto, HostSummary, ImageDto, NetworkDto, PruneResult,
+    StatDto, VolumeDto,
 };
 use state::{AppState, Host, Settings};
 
@@ -317,9 +318,124 @@ async fn exec_run(
     docker::exec_run(&docker, &id, &cmd).await
 }
 
+#[tauri::command]
+async fn deploy_container(
+    app: tauri::AppHandle,
+    host_id: String,
+    spec: DeploySpec,
+    autostart: bool,
+) -> Result<String, String> {
+    ensure_writable(&app.state::<AppState>())?;
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::create_container(&docker, spec, autostart).await
+}
+
+#[tauri::command]
+async fn container_config(
+    app: tauri::AppHandle,
+    host_id: String,
+    id: String,
+) -> Result<DeploySpec, String> {
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::container_config(&docker, &id).await
+}
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// alerts watcher
+// ---------------------------------------------------------------------------
+
+/// Background loop: poll every host on the configured interval and fire a
+/// desktop notification when a container transitions into a bad state
+/// (crash/exit/dead/unhealthy). The first observation only seeds the baseline.
+async fn alert_loop(app: AppHandle) {
+    loop {
+        let (enabled, secs) = {
+            let st = app.state::<AppState>();
+            let d = st.data.lock();
+            d.map(|d| (d.settings.alerts_enabled, d.settings.alert_poll_secs))
+                .unwrap_or((false, 30))
+        };
+        let wait = if secs < 5 { 5 } else { secs };
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+
+        if !enabled {
+            continue;
+        }
+
+        let hosts = {
+            let st = app.state::<AppState>();
+            let hosts = st.data.lock().map(|d| d.hosts.clone());
+            match hosts {
+                Ok(h) => h,
+                Err(_) => continue,
+            }
+        };
+
+        for host in hosts {
+            // Resolve the connection in a scope that ends before the await, so
+            // the borrow of `app` (via State) never crosses the await point.
+            let docker = {
+                let st = app.state::<AppState>();
+                resolve(&st, &host.id)
+            };
+            let Ok(docker) = docker else {
+                continue;
+            };
+            let Ok(list) = docker::list_containers(&docker).await else {
+                continue;
+            };
+
+            for c in list {
+                let key = format!("{}/{}", host.id, c.name);
+                let current = if c.health == "unhealthy" {
+                    "unhealthy".to_string()
+                } else {
+                    c.state.clone()
+                };
+
+                // Read the previous state and record the new one atomically.
+                let previous = {
+                    let st = app.state::<AppState>();
+                    let prev = st.last_states.lock().ok().and_then(|m| m.get(&key).cloned());
+                    if let Ok(mut m) = st.last_states.lock() {
+                        m.insert(key.clone(), current.clone());
+                    }
+                    prev
+                };
+
+                let Some(previous) = previous else {
+                    continue; // first sight: just seed the baseline
+                };
+                if previous == current {
+                    continue;
+                }
+
+                let bad = matches!(current.as_str(), "exited" | "dead" | "unhealthy");
+                if bad {
+                    let title = format!("⚠ {} · {}", c.name, host.name);
+                    let body = match current.as_str() {
+                        "unhealthy" => "Health check fallito".to_string(),
+                        _ => format!("Il container è passato a «{current}»"),
+                    };
+                    let _ = app.notification().builder().title(title).body(body).show();
+                    let _ = tauri::Emitter::emit(
+                        &app,
+                        "dockone-alert",
+                        serde_json::json!({
+                            "host": host.name,
+                            "container": c.name,
+                            "state": current,
+                        }),
+                    );
+                }
+            }
+        }
+    }
+}
 
 fn slug(s: &str) -> String {
     let base: String = s
@@ -380,7 +496,14 @@ pub fn run() {
             remove_volume,
             remove_network,
             exec_run,
+            deploy_container,
+            container_config,
         ])
+        .setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(alert_loop(handle));
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

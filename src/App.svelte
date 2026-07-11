@@ -19,6 +19,8 @@
     theme: "light",
     read_only: false,
     favorite_containers: [],
+    alerts_enabled: false,
+    alert_poll_secs: 30,
   });
   let showSettings = $state(false);
   let reloadKey = $state(0);
@@ -81,6 +83,14 @@
   }
   async function toggleReadOnly() {
     settings = { ...settings, read_only: !settings.read_only };
+    await api.saveSettings(settings);
+  }
+  async function toggleAlerts() {
+    settings = { ...settings, alerts_enabled: !settings.alerts_enabled };
+    await api.saveSettings(settings);
+  }
+  async function saveInterval(v: number) {
+    settings = { ...settings, alert_poll_secs: Math.max(5, v || 30) };
     await api.saveSettings(settings);
   }
   async function addHost() {
@@ -149,7 +159,7 @@
 
         <div class="side-foot">
           <b>{hosts.length}</b> host configurati<br />
-          DockOne · v0.2.0
+          DockOne · v0.3.0
         </div>
       </aside>
 
@@ -231,6 +241,22 @@
         <label class="toggle">
           <input type="checkbox" style="width:auto" checked={settings.theme === "dark"} onchange={toggleTheme} />
           Tema scuro
+        </label>
+
+        <div class="section-title" style="margin-top:22px">Alerts</div>
+        <label class="toggle" style="margin-bottom:12px">
+          <input type="checkbox" style="width:auto" checked={settings.alerts_enabled} onchange={toggleAlerts} />
+          Notifica crash / stato unhealthy dei container
+        </label>
+        <label class="toggle">
+          Intervallo di controllo (secondi):
+          <input
+            type="number"
+            min="5"
+            style="width:90px"
+            value={settings.alert_poll_secs}
+            onchange={(e) => saveInterval(parseInt(e.currentTarget.value, 10))}
+          />
         </label>
       </div>
     </div>

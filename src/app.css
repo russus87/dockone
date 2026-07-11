@@ -249,9 +249,10 @@ select {
 }
 .sidebar select {
   width: 100%;
-  background: var(--sidebar-active);
-  color: var(--sidebar-fg);
-  border: 1px solid var(--sidebar-border);
+  background: rgba(255, 255, 255, 0.95);
+  color: #1c2436;
+  font-weight: 600;
+  border: 1px solid rgba(255, 255, 255, 0.35);
   border-radius: 10px;
   padding: 9px 11px;
   font-size: 13px;
@@ -259,6 +260,7 @@ select {
 }
 .sidebar select option {
   color: #1a1a1a;
+  background: #ffffff;
 }
 .nav-item {
   display: flex;

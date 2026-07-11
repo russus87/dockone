@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api, ago } from "./api";
-  import type { Container, Settings } from "./types";
+  import type { Container, DeploySpec, Settings } from "./types";
+  import DeployModal from "./DeployModal.svelte";
 
   let {
     hostId,
@@ -29,6 +30,10 @@
   let execCmd = $state("");
   let execOut = $state("");
   let execBusy = $state(false);
+
+  let deployOpen = $state(false);
+  let deployInitial = $state<DeploySpec | null>(null);
+  let deployTitle = $state("Deploy container");
 
   async function load() {
     loading = true;
@@ -81,6 +86,28 @@
     } finally {
       busy = { ...busy, [c.id]: false };
     }
+  }
+
+  function openDeploy() {
+    deployInitial = null;
+    deployTitle = "Deploy container";
+    deployOpen = true;
+  }
+
+  async function clone(c: Container) {
+    error = null;
+    try {
+      deployInitial = await api.containerConfig(hostId, c.id);
+      deployTitle = `Clona · ${c.name}`;
+      deployOpen = true;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  function onDeployed() {
+    deployOpen = false;
+    load();
   }
 
   const selectedIds = $derived(Object.keys(selected).filter((id) => selected[id]));
@@ -174,6 +201,10 @@
 </script>
 
 <div>
+  <div style="display:flex;justify-content:flex-end;margin-bottom:14px">
+    <button class="btn" onclick={openDeploy}>＋ Deploy container</button>
+  </div>
+
   {#if error}<div class="err-banner">{error}</div>{/if}
 
   {#if selectedIds.length > 0}
@@ -223,17 +254,22 @@
             <td class="mono">{c.compose ?? "—"}</td>
             <td class="mono">{c.ports.join(", ") || "—"}</td>
             <td>
-              <div class="actions" style="justify-content:flex-end">
+              <div class="actions" style="justify-content:flex-end;flex-wrap:wrap">
                 {#if c.state === "running"}
                   <button class="act danger" disabled={busy[c.id]} onclick={() => act(c, "stop")}>Stop</button>
                   <button class="act" disabled={busy[c.id]} onclick={() => act(c, "restart")}>Restart</button>
+                  <button class="act" disabled={busy[c.id]} onclick={() => act(c, "pause")}>Pause</button>
+                  <button class="act danger" disabled={busy[c.id]} onclick={() => act(c, "kill")}>Kill</button>
                   <button class="act" onclick={() => openExec(c)}>Exec</button>
+                {:else if c.state === "paused"}
+                  <button class="act primary" disabled={busy[c.id]} onclick={() => act(c, "unpause")}>Unpause</button>
                 {:else}
                   <button class="act primary" disabled={busy[c.id]} onclick={() => act(c, "start")}>Start</button>
                   <button class="act danger" disabled={busy[c.id]} onclick={() => remove(c)}>Rimuovi</button>
                 {/if}
                 <button class="act" onclick={() => openLogs(c)}>Logs</button>
                 <button class="act" onclick={() => openInspect(c)}>Inspect</button>
+                <button class="act" onclick={() => clone(c)}>Clona</button>
               </div>
             </td>
           </tr>
@@ -284,6 +320,16 @@
       </div>
     </div>
   </div>
+{/if}
+
+{#if deployOpen}
+  <DeployModal
+    {hostId}
+    initial={deployInitial}
+    title={deployTitle}
+    onClose={() => (deployOpen = false)}
+    onDone={onDeployed}
+  />
 {/if}
 
 <style>

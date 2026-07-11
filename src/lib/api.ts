@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Container,
+  DeploySpec,
   Df,
   DockerEvent,
   Host,
@@ -57,6 +58,10 @@ export const api = {
     invoke<void>("remove_network", { hostId, id }),
   execRun: (hostId: string, id: string, cmd: string) =>
     invoke<string>("exec_run", { hostId, id, cmd }),
+  deployContainer: (hostId: string, spec: DeploySpec, autostart: boolean) =>
+    invoke<string>("deploy_container", { hostId, spec, autostart }),
+  containerConfig: (hostId: string, id: string) =>
+    invoke<DeploySpec>("container_config", { hostId, id }),
 };
 
 export function humanBytes(n: number): string {
