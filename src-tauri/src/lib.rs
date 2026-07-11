@@ -1,0 +1,297 @@
+mod docker;
+mod state;
+
+use bollard::Docker;
+use futures_util::future::join_all;
+use tauri::{Manager, State};
+
+use docker::{ContainerDto, HostSummary, ImageDto, NetworkDto, VolumeDto};
+use state::{AppState, Host, Settings};
+
+// ---------------------------------------------------------------------------
+// connection resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve a live Docker handle for `host_id`, reusing the cached connection.
+fn resolve(app_state: &AppState, host_id: &str) -> Result<Docker, String> {
+    // fast path: already connected
+    if let Ok(cache) = app_state.conns.lock() {
+        if let Some(d) = cache.get(host_id) {
+            return Ok(d.clone());
+        }
+    }
+
+    let host = {
+        let d = app_state.data.lock().map_err(|_| "stato bloccato")?;
+        d.hosts
+            .iter()
+            .find(|h| h.id == host_id)
+            .cloned()
+            .ok_or_else(|| format!("host «{host_id}» non trovato"))?
+    };
+
+    let docker = docker::connect(&host)?;
+    if let Ok(mut cache) = app_state.conns.lock() {
+        cache.insert(host_id.to_string(), docker.clone());
+    }
+    Ok(docker)
+}
+
+fn ensure_writable(app_state: &AppState) -> Result<(), String> {
+    let ro = app_state
+        .data
+        .lock()
+        .map(|d| d.settings.read_only)
+        .unwrap_or(false);
+    if ro {
+        Err("Modalità sola lettura attiva".into())
+    } else {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// host management
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn list_hosts(st: State<AppState>) -> Result<Vec<Host>, String> {
+    Ok(st.data.lock().map_err(|_| "stato bloccato")?.hosts.clone())
+}
+
+#[tauri::command]
+fn add_host(st: State<AppState>, name: String, endpoint: String) -> Result<Vec<Host>, String> {
+    let name = name.trim().to_string();
+    let endpoint = endpoint.trim().to_string();
+    if name.is_empty() || endpoint.is_empty() {
+        return Err("Nome ed endpoint sono obbligatori".into());
+    }
+    let id = slug(&name);
+    {
+        let mut d = st.data.lock().map_err(|_| "stato bloccato")?;
+        if d.hosts.iter().any(|h| h.id == id) {
+            return Err("Esiste già un host con questo nome".into());
+        }
+        d.hosts.push(Host {
+            id,
+            name,
+            endpoint,
+            favorite: false,
+        });
+    }
+    st.save();
+    list_hosts(st)
+}
+
+#[tauri::command]
+fn remove_host(st: State<AppState>, id: String) -> Result<Vec<Host>, String> {
+    if id == "local" {
+        return Err("L'host locale non può essere rimosso".into());
+    }
+    {
+        let mut d = st.data.lock().map_err(|_| "stato bloccato")?;
+        d.hosts.retain(|h| h.id != id);
+    }
+    if let Ok(mut c) = st.conns.lock() {
+        c.remove(&id);
+    }
+    st.save();
+    list_hosts(st)
+}
+
+#[tauri::command]
+fn toggle_host_favorite(st: State<AppState>, id: String) -> Result<Vec<Host>, String> {
+    {
+        let mut d = st.data.lock().map_err(|_| "stato bloccato")?;
+        if let Some(h) = d.hosts.iter_mut().find(|h| h.id == id) {
+            h.favorite = !h.favorite;
+        }
+    }
+    st.save();
+    list_hosts(st)
+}
+
+// ---------------------------------------------------------------------------
+// settings
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_settings(st: State<AppState>) -> Result<Settings, String> {
+    Ok(st.data.lock().map_err(|_| "stato bloccato")?.settings.clone())
+}
+
+#[tauri::command]
+fn save_settings(st: State<AppState>, settings: Settings) -> Result<(), String> {
+    {
+        let mut d = st.data.lock().map_err(|_| "stato bloccato")?;
+        d.settings = settings;
+    }
+    st.save();
+    Ok(())
+}
+
+#[tauri::command]
+fn toggle_favorite_container(st: State<AppState>, key: String) -> Result<Settings, String> {
+    {
+        let mut d = st.data.lock().map_err(|_| "stato bloccato")?;
+        let favs = &mut d.settings.favorite_containers;
+        if let Some(pos) = favs.iter().position(|k| k == &key) {
+            favs.remove(pos);
+        } else {
+            favs.push(key);
+        }
+    }
+    st.save();
+    get_settings(st)
+}
+
+// ---------------------------------------------------------------------------
+// docker queries
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn dashboard(app: tauri::AppHandle) -> Result<Vec<HostSummary>, String> {
+    let st = app.state::<AppState>();
+    let hosts = st.data.lock().map_err(|_| "stato bloccato")?.hosts.clone();
+
+    let futures = hosts.into_iter().map(|host| {
+        let st = app.state::<AppState>();
+        async move {
+            match resolve(&st, &host.id) {
+                Ok(docker) => docker::host_summary(&host, &docker).await,
+                Err(e) => HostSummary {
+                    id: host.id.clone(),
+                    name: host.name.clone(),
+                    online: false,
+                    error: Some(e),
+                    containers: 0,
+                    running: 0,
+                    stopped: 0,
+                    paused: 0,
+                    images: 0,
+                    cpus: 0,
+                    mem_total: 0,
+                    docker_version: None,
+                    os: None,
+                },
+            }
+        }
+    });
+
+    Ok(join_all(futures).await)
+}
+
+#[tauri::command]
+async fn get_containers(app: tauri::AppHandle, host_id: String) -> Result<Vec<ContainerDto>, String> {
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::list_containers(&docker).await
+}
+
+#[tauri::command]
+async fn get_images(app: tauri::AppHandle, host_id: String) -> Result<Vec<ImageDto>, String> {
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::list_images(&docker).await
+}
+
+#[tauri::command]
+async fn get_volumes(app: tauri::AppHandle, host_id: String) -> Result<Vec<VolumeDto>, String> {
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::list_volumes(&docker).await
+}
+
+#[tauri::command]
+async fn get_networks(app: tauri::AppHandle, host_id: String) -> Result<Vec<NetworkDto>, String> {
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::list_networks(&docker).await
+}
+
+#[tauri::command]
+async fn container_action(
+    app: tauri::AppHandle,
+    host_id: String,
+    id: String,
+    action: String,
+) -> Result<(), String> {
+    ensure_writable(&app.state::<AppState>())?;
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::container_action(&docker, &id, &action).await
+}
+
+#[tauri::command]
+async fn container_logs(
+    app: tauri::AppHandle,
+    host_id: String,
+    id: String,
+    tail: Option<String>,
+) -> Result<String, String> {
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::container_logs(&docker, &id, tail.as_deref().unwrap_or("200")).await
+}
+
+#[tauri::command]
+async fn inspect_container(
+    app: tauri::AppHandle,
+    host_id: String,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    docker::inspect_container(&docker, &id).await
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+fn slug(s: &str) -> String {
+    let base: String = s
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let base = base.trim_matches('-').to_string();
+    if base.is_empty() {
+        "host".into()
+    } else {
+        base
+    }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }));
+    }
+
+    builder
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
+        .manage(AppState::load())
+        .invoke_handler(tauri::generate_handler![
+            list_hosts,
+            add_host,
+            remove_host,
+            toggle_host_favorite,
+            get_settings,
+            save_settings,
+            toggle_favorite_container,
+            dashboard,
+            get_containers,
+            get_images,
+            get_volumes,
+            get_networks,
+            container_action,
+            container_logs,
+            inspect_container,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

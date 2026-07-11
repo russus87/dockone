@@ -1,0 +1,35 @@
+[package]
+name = "dockone"
+version = "0.1.0"
+description = "The Raycast for sysadmins — an elegant multi-host Docker control center"
+authors = ["russus"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "dockone_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["image-png"] }
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "process", "time"] }
+futures-util = "0.3"
+dirs = "5"
+bollard = { version = "0.17", default-features = false }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

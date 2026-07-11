@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=DockOne
+Comment=Multi-host Docker control center — the Raycast for sysadmins
+Exec=dockone
+Icon=dockone
+Terminal=false
+Categories=Development;System;Utility;
+StartupNotify=true
+Keywords=docker;container;devops;sysadmin;server;monitoring;

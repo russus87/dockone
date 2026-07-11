@@ -1,0 +1,24 @@
+# Maintainer: russus <russus2@gmail.com>
+# Prebuilt PKGBUILD: assembles an Arch package from artifacts already produced
+# by the CI build step (no compilation happens here).
+pkgname=dockone
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="Multi-host Docker control center — the Raycast for sysadmins"
+arch=('x86_64')
+url="https://github.com/russus87/dockone"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3')
+options=('!strip' '!debug')
+
+package() {
+  install -Dm755 "$startdir/dockone" "$pkgdir/usr/bin/dockone"
+  install -Dm644 "$startdir/dockone.desktop" \
+    "$pkgdir/usr/share/applications/dockone.desktop"
+  install -Dm644 "$startdir/icon-128.png" \
+    "$pkgdir/usr/share/icons/hicolor/128x128/apps/dockone.png"
+  install -Dm644 "$startdir/icon-256.png" \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/dockone.png"
+  install -Dm644 "$startdir/icon-512.png" \
+    "$pkgdir/usr/share/icons/hicolor/512x512/apps/dockone.png"
+}
