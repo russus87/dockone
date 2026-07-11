@@ -18,14 +18,26 @@ pub fn connect(host: &Host) -> Result<Docker, String> {
     let ep = host.endpoint.trim();
     let docker = if ep.is_empty() || ep == "local" {
         Docker::connect_with_local_defaults()
-    } else if let Some(rest) = ep.strip_prefix("unix://") {
-        Docker::connect_with_unix(rest, 120, bollard::API_DEFAULT_VERSION)
+    } else if let Some(path) = ep.strip_prefix("unix://") {
+        connect_unix(path)
     } else {
         // tcp:// and http:// both speak the plain HTTP Docker API.
         let addr = ep.replace("tcp://", "http://");
         Docker::connect_with_http(&addr, 120, bollard::API_DEFAULT_VERSION)
     };
     docker.map_err(|e| format!("connessione a «{}» fallita: {e}", host.name))
+}
+
+#[cfg(unix)]
+fn connect_unix(path: &str) -> Result<Docker, bollard::errors::Error> {
+    Docker::connect_with_unix(path, 120, bollard::API_DEFAULT_VERSION)
+}
+
+#[cfg(not(unix))]
+fn connect_unix(_path: &str) -> Result<Docker, bollard::errors::Error> {
+    // Unix domain sockets aren't available here (e.g. Windows) — fall back to
+    // the platform default endpoint (named pipe on Windows).
+    Docker::connect_with_local_defaults()
 }
 
 // ---------------------------------------------------------------------------
