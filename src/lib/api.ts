@@ -26,6 +26,8 @@ export const api = {
 
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
+  exportConfig: (path: string) => invoke<void>("export_config", { path }),
+  importConfig: (path: string) => invoke<void>("import_config", { path }),
   toggleFavoriteContainer: (key: string) =>
     invoke<Settings>("toggle_favorite_container", { key }),
 

@@ -10,7 +10,7 @@ use docker::{
     ContainerDto, DeploySpec, DfDto, EventDto, HostSummary, ImageDto, NetworkDto, PruneResult,
     StatDto, VolumeDto,
 };
-use state::{AppState, Host, Settings};
+use state::{AppState, Host, PersistedData, Settings};
 
 // ---------------------------------------------------------------------------
 // connection resolution
@@ -155,6 +155,54 @@ fn save_settings(st: State<AppState>, settings: Settings) -> Result<(), String> 
     {
         let mut d = st.data.lock().map_err(|_| "stato bloccato")?;
         d.settings = settings;
+    }
+    st.save();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// backup: export / import config
+// ---------------------------------------------------------------------------
+
+/// Write the full DockOne configuration (hosts + settings) to `path` as JSON.
+#[tauri::command]
+fn export_config(st: State<AppState>, path: String) -> Result<(), String> {
+    let json = {
+        let d = st.data.lock().map_err(|_| "stato bloccato")?;
+        serde_json::to_string_pretty(&*d).map_err(|e| e.to_string())?
+    };
+    std::fs::write(&path, json).map_err(|e| format!("scrittura fallita: {e}"))
+}
+
+/// Replace the current configuration with the one stored in the file at `path`.
+#[tauri::command]
+fn import_config(st: State<AppState>, path: String) -> Result<(), String> {
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("lettura fallita: {e}"))?;
+    let mut parsed: PersistedData =
+        serde_json::from_str(&raw).map_err(|e| format!("JSON non valido: {e}"))?;
+
+    // never end up without the local host
+    if !parsed.hosts.iter().any(|h| h.id == "local") {
+        parsed.hosts.insert(
+            0,
+            Host {
+                id: "local".into(),
+                name: "Local".into(),
+                endpoint: "local".into(),
+                favorite: true,
+            },
+        );
+    }
+
+    {
+        let mut d = st.data.lock().map_err(|_| "stato bloccato")?;
+        *d = parsed;
+    }
+    if let Ok(mut c) = st.conns.lock() {
+        c.clear();
+    }
+    if let Ok(mut m) = st.last_states.lock() {
+        m.clear();
     }
     st.save();
     Ok(())
@@ -495,6 +543,7 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::load())
         .invoke_handler(tauri::generate_handler![
             list_hosts,
@@ -504,6 +553,8 @@ pub fn run() {
             toggle_host_favorite,
             get_settings,
             save_settings,
+            export_config,
+            import_config,
             toggle_favorite_container,
             dashboard,
             get_containers,

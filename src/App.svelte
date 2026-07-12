@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { open, save } from "@tauri-apps/plugin-dialog";
   import { api } from "./lib/api";
   import type { Host, Settings, View } from "./lib/types";
   import Dashboard from "./lib/Dashboard.svelte";
@@ -139,6 +140,42 @@
     hosts = await api.removeHost(id);
     if (hostId === id) hostId = "local";
   }
+
+  let backupMsg = $state<{ ok: boolean; text: string } | null>(null);
+
+  async function exportConfig() {
+    backupMsg = null;
+    try {
+      const path = await save({
+        defaultPath: "dockone-backup.json",
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!path) return;
+      await api.exportConfig(path);
+      backupMsg = { ok: true, text: `Configurazione esportata in ${path}` };
+    } catch (e) {
+      backupMsg = { ok: false, text: String(e) };
+    }
+  }
+
+  async function importConfig() {
+    backupMsg = null;
+    try {
+      const path = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!path || typeof path !== "string") return;
+      await api.importConfig(path);
+      hosts = await api.listHosts();
+      settings = await api.getSettings();
+      if (!hosts.some((h) => h.id === hostId)) hostId = "local";
+      backupMsg = { ok: true, text: "Configurazione importata con successo" };
+    } catch (e) {
+      backupMsg = { ok: false, text: String(e) };
+    }
+  }
   function refresh() {
     reloadKey++;
   }
@@ -191,7 +228,7 @@
 
         <div class="side-foot">
           <b>{hosts.length}</b> host configurati<br />
-          DockOne · v0.3.1
+          DockOne · v0.3.2
         </div>
       </aside>
 
@@ -305,6 +342,16 @@
             onchange={(e) => saveInterval(parseInt(e.currentTarget.value, 10))}
           />
         </label>
+
+        <div class="section-title" style="margin-top:22px">Backup configurazione</div>
+        {#if backupMsg}
+          <div class={backupMsg.ok ? "ok-banner" : "err-banner"}>{backupMsg.ok ? "✓ " : "✗ "}{backupMsg.text}</div>
+        {/if}
+        <div style="display:flex;gap:8px">
+          <button class="btn ghost" onclick={exportConfig}>⭳ Esporta…</button>
+          <button class="btn ghost" onclick={importConfig}>⭱ Importa…</button>
+        </div>
+        <p class="meta">Salva o ripristina host e impostazioni in un file JSON.</p>
       </div>
     </div>
   </div>

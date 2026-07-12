@@ -1,6 +1,6 @@
 {
   "name": "dockone",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "The Raycast for sysadmins — an elegant multi-host Docker control center",
   "type": "module",
   "scripts": {
@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
     "@tauri-apps/plugin-notification": "^2.0.0",
     "@tauri-apps/plugin-opener": "^2.0.0"
   }

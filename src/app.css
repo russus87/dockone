@@ -687,6 +687,15 @@ pre.json {
 .btn:hover {
   filter: brightness(1.06);
 }
+.btn.ghost {
+  background: var(--card-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.btn.ghost:hover {
+  background: var(--row-hover);
+  filter: none;
+}
 .meta {
   color: var(--text-faint);
   font-size: 12px;

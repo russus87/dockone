@@ -37,6 +37,8 @@ DockOne is a cross-platform Docker control center built with **Rust + Tauri v2**
 - **Exec** — run a command inside a running container and see its output.
 - **Alerts** — background watcher that fires a desktop notification when a container **crashes or turns unhealthy**.
 - **Health & stacks** — health status badges and docker‑compose project grouping.
+- **Test connection** — probe a host (local or remote) and see its Docker version before saving it.
+- **Export / Import** — back up and restore your hosts & settings to a JSON file.
 - **Search & filter** — instant fuzzy search across hosts and containers.
 - **Favorites** — pin the hosts and containers you touch the most.
 - **Read‑only mode** — safe monitoring that blocks mutating actions.
