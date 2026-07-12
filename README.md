@@ -41,6 +41,8 @@ DockOne is a cross-platform Docker control center built with **Rust + Tauri v2**
 - **Interactive terminal** — a real streaming shell (xterm.js) inside any running container, with live resize and selectable shell.
 - **Live logs** — real‑time follow with filter and download to file.
 - **Update container** — one click pulls the newer image and recreates the container with the same config.
+- **File browser** — browse a container's filesystem, preview text, download and upload files.
+- **System tray** — DockOne lives in the tray; close hides to tray, with quick open/quit.
 - **Alerts** — background watcher that fires a desktop notification when a container **crashes or turns unhealthy**.
 - **Health & stacks** — health status badges and docker‑compose project grouping.
 - **Test connection** — probe a host (local or remote) and see its Docker version before saving it.

@@ -89,7 +89,22 @@ export const api = {
     invoke<void>("save_text", { path, content }),
   updateContainer: (hostId: string, id: string) =>
     invoke<void>("update_container", { hostId, id }),
+
+  fsList: (hostId: string, id: string, path: string) =>
+    invoke<FsEntry[]>("fs_list", { hostId, id, path }),
+  fsRead: (hostId: string, id: string, path: string) =>
+    invoke<string>("fs_read", { hostId, id, path }),
+  fsDownload: (hostId: string, id: string, path: string, dest: string) =>
+    invoke<void>("fs_download", { hostId, id, path, dest }),
+  fsUpload: (hostId: string, id: string, src: string, destDir: string) =>
+    invoke<void>("fs_upload", { hostId, id, src, destDir }),
 };
+
+export interface FsEntry {
+  name: string;
+  kind: string; // dir | file | link
+  size: number;
+}
 
 export interface FlatContainer {
   host_id: string;

@@ -896,6 +896,68 @@ pub async fn compose_meta(
     Ok((files, workdir))
 }
 
+// ---------------------------------------------------------------------------
+// container file transfer (archive API)
+// ---------------------------------------------------------------------------
+
+/// Download a single file from a container and return its raw bytes.
+pub async fn download_file(docker: &Docker, id: &str, path: &str) -> Result<Vec<u8>, String> {
+    use bollard::container::DownloadFromContainerOptions;
+    let mut stream = docker.download_from_container(
+        id,
+        Some(DownloadFromContainerOptions {
+            path: path.to_string(),
+        }),
+    );
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        buf.extend_from_slice(&chunk.map_err(err)?);
+    }
+    // the archive contains the single requested path; return the first file
+    let mut ar = tar::Archive::new(std::io::Cursor::new(buf));
+    for entry in ar.entries().map_err(|e| e.to_string())? {
+        let mut e = entry.map_err(|e| e.to_string())?;
+        if e.header().entry_type().is_file() {
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(&mut e, &mut out).map_err(|e| e.to_string())?;
+            return Ok(out);
+        }
+    }
+    Err("nessun file nell'archivio".into())
+}
+
+/// Upload `bytes` as `filename` into `dest_dir` inside a container.
+pub async fn upload_file(
+    docker: &Docker,
+    id: &str,
+    dest_dir: &str,
+    filename: &str,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    use bollard::container::UploadToContainerOptions;
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(bytes.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, filename, bytes.as_slice())
+        .map_err(|e| e.to_string())?;
+    let tar_bytes = builder.into_inner().map_err(|e| e.to_string())?;
+
+    docker
+        .upload_to_container(
+            id,
+            Some(UploadToContainerOptions {
+                path: dest_dir.to_string(),
+                ..Default::default()
+            }),
+            tar_bytes.into(),
+        )
+        .await
+        .map_err(err)
+}
+
 /// The locally-pulled content digest (`sha256:…`) for an image tag, if known.
 pub async fn image_local_digest(docker: &Docker, tag: &str) -> Option<String> {
     let d = docker.inspect_image(tag).await.ok()?;

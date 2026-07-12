@@ -8,7 +8,7 @@ pkgdesc="Multi-host Docker control center — the Raycast for sysadmins"
 arch=('x86_64')
 url="https://github.com/russus87/dockone"
 license=('MIT')
-depends=('webkit2gtk-4.1' 'gtk3')
+depends=('webkit2gtk-4.1' 'gtk3' 'libappindicator-gtk3')
 options=('!strip' '!debug')
 
 package() {

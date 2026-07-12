@@ -4,6 +4,7 @@
   import DeployModal from "./DeployModal.svelte";
   import TerminalModal from "./TerminalModal.svelte";
   import LogViewer from "./LogViewer.svelte";
+  import FileBrowser from "./FileBrowser.svelte";
 
   let {
     hostId,
@@ -28,6 +29,7 @@
   let inspectFor = $state<Container | null>(null);
   let inspectText = $state("");
   let termFor = $state<Container | null>(null);
+  let fileFor = $state<Container | null>(null);
 
   let deployOpen = $state(false);
   let deployInitial = $state<DeploySpec | null>(null);
@@ -290,6 +292,7 @@
                   <button class="act" disabled={busy[c.id]} onclick={() => act(c, "restart")}>Restart</button>
                   <button class="act" disabled={busy[c.id]} onclick={() => act(c, "pause")}>Pause</button>
                   <button class="act primary" onclick={() => openTerm(c)}>Term</button>
+                  <button class="act" onclick={() => (fileFor = c)}>File</button>
                 {:else if c.state === "paused"}
                   <button class="act primary" disabled={busy[c.id]} onclick={() => act(c, "unpause")}>Unpause</button>
                 {:else}
@@ -327,6 +330,10 @@
 
 {#if termFor}
   <TerminalModal {hostId} container={termFor} onClose={() => (termFor = null)} />
+{/if}
+
+{#if fileFor}
+  <FileBrowser {hostId} container={fileFor} onClose={() => (fileFor = null)} />
 {/if}
 
 {#if deployOpen}

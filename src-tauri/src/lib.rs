@@ -9,7 +9,9 @@ use bollard::Docker;
 use futures_util::future::join_all;
 use futures_util::StreamExt;
 use std::sync::atomic::Ordering;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 use tokio::io::AsyncWriteExt;
 
@@ -1052,6 +1054,169 @@ async fn update_container(app: AppHandle, host_id: String, id: String) -> Result
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// container file browser
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct FsEntry {
+    name: String,
+    kind: String,
+    size: i64,
+}
+
+fn shell_quote(p: &str) -> String {
+    format!("'{}'", p.replace('\'', "'\\''"))
+}
+
+#[tauri::command]
+async fn fs_list(
+    app: AppHandle,
+    host_id: String,
+    id: String,
+    path: String,
+) -> Result<Vec<FsEntry>, String> {
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
+    let out = docker::exec_run(
+        &docker,
+        &id,
+        &format!("ls -la --time-style=long-iso -- {}", shell_quote(&path)),
+    )
+    .await?;
+
+    let mut entries = Vec::new();
+    for line in out.lines() {
+        let line = line.trim_end();
+        if line.is_empty() || line.starts_with("total ") {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 8 {
+            continue;
+        }
+        let kind = match parts[0].chars().next() {
+            Some('d') => "dir",
+            Some('l') => "link",
+            _ => "file",
+        };
+        let size = parts[4].parse::<i64>().unwrap_or(0);
+        let mut name = parts[7..].join(" ");
+        if kind == "link" {
+            if let Some(idx) = name.find(" -> ") {
+                name.truncate(idx);
+            }
+        }
+        if name == "." || name == ".." {
+            continue;
+        }
+        entries.push(FsEntry {
+            name,
+            kind: kind.to_string(),
+            size,
+        });
+    }
+    entries.sort_by(|a, b| {
+        (a.kind != "dir")
+            .cmp(&(b.kind != "dir"))
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(entries)
+}
+
+#[tauri::command]
+async fn fs_read(app: AppHandle, host_id: String, id: String, path: String) -> Result<String, String> {
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
+    docker::exec_run(&docker, &id, &format!("cat -- {}", shell_quote(&path))).await
+}
+
+#[tauri::command]
+async fn fs_download(
+    app: AppHandle,
+    host_id: String,
+    id: String,
+    path: String,
+    dest: String,
+) -> Result<(), String> {
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
+    let bytes = docker::download_file(&docker, &id, &path).await?;
+    std::fs::write(&dest, bytes).map_err(|e| format!("scrittura fallita: {e}"))
+}
+
+#[tauri::command]
+async fn fs_upload(
+    app: AppHandle,
+    host_id: String,
+    id: String,
+    src: String,
+    dest_dir: String,
+) -> Result<(), String> {
+    ensure_writable(&app.state::<AppState>())?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
+    let bytes = std::fs::read(&src).map_err(|e| format!("lettura fallita: {e}"))?;
+    let filename = std::path::Path::new(&src)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("upload")
+        .to_string();
+    docker::upload_file(&docker, &id, &dest_dir, &filename, bytes).await
+}
+
+// ---------------------------------------------------------------------------
+// system tray
+// ---------------------------------------------------------------------------
+
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+fn toggle_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        match w.is_visible() {
+            Ok(true) => {
+                let _ = w.hide();
+            }
+            _ => {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }
+    }
+}
+
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let open_i = MenuItem::with_id(app, "open", "Apri DockOne", true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let quit_i = MenuItem::with_id(app, "quit", "Esci", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open_i, &sep, &quit_i])?;
+
+    let _tray = TrayIconBuilder::with_id("main-tray")
+        .icon(app.default_window_icon().cloned().unwrap())
+        .tooltip("DockOne")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_main(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                toggle_main(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1232,12 +1397,29 @@ pub fn run() {
             log_stop,
             save_text,
             update_container,
+            fs_list,
+            fs_read,
+            fs_download,
+            fs_upload,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(alert_loop(handle.clone()));
             tauri::async_runtime::spawn(metrics_loop(handle.clone()));
-            tauri::async_runtime::spawn(scheduler_loop(handle));
+            tauri::async_runtime::spawn(scheduler_loop(handle.clone()));
+
+            build_tray(&handle)?;
+
+            // hide to tray instead of quitting when the window is closed
+            if let Some(w) = app.get_webview_window("main") {
+                let wc = w.clone();
+                w.on_window_event(move |e| {
+                    if let WindowEvent::CloseRequested { api, .. } = e {
+                        api.prevent_close();
+                        let _ = wc.hide();
+                    }
+                });
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

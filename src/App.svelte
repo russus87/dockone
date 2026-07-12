@@ -265,7 +265,7 @@
 
         <div class="side-foot">
           <b>{hosts.length}</b> host configurati<br />
-          DockOne · v0.7.0
+          DockOne · v0.8.0
         </div>
       </aside>
 
