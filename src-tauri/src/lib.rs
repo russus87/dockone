@@ -3,6 +3,7 @@ mod registry;
 mod ssh;
 mod state;
 
+use bollard::container::LogsOptions;
 use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::Docker;
 use futures_util::future::join_all;
@@ -919,6 +920,138 @@ async fn check_image_updates(app: AppHandle, host_id: String) -> Result<Vec<Imag
     Ok(join_all(futs).await)
 }
 
+// ---------------------------------------------------------------------------
+// command palette: containers across all hosts
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct FlatContainer {
+    host_id: String,
+    host_name: String,
+    id: String,
+    name: String,
+    image: String,
+    state: String,
+}
+
+#[tauri::command]
+async fn all_containers(app: AppHandle) -> Result<Vec<FlatContainer>, String> {
+    let hosts = {
+        let st = app.state::<AppState>();
+        let d = st.data.lock().map_err(|_| "stato bloccato")?;
+        d.hosts.clone()
+    };
+
+    let futs = hosts.into_iter().map(|host| {
+        let app = app.clone();
+        async move {
+            let docker = match resolve(&app.state::<AppState>(), &host.id).await {
+                Ok(d) => d,
+                Err(_) => return Vec::new(),
+            };
+            match docker::list_containers(&docker).await {
+                Ok(list) => list
+                    .into_iter()
+                    .map(|c| FlatContainer {
+                        host_id: host.id.clone(),
+                        host_name: host.name.clone(),
+                        id: c.id,
+                        name: c.name,
+                        image: c.image,
+                        state: c.state,
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        }
+    });
+    Ok(join_all(futs).await.into_iter().flatten().collect())
+}
+
+// ---------------------------------------------------------------------------
+// live log follow
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn log_start(
+    app: AppHandle,
+    host_id: String,
+    id: String,
+    tail: Option<String>,
+) -> Result<String, String> {
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
+    let opts = LogsOptions::<String> {
+        follow: true,
+        stdout: true,
+        stderr: true,
+        timestamps: false,
+        tail: tail.unwrap_or_else(|| "300".into()),
+        ..Default::default()
+    };
+    let mut stream = docker.logs(&id, Some(opts));
+
+    let session = {
+        let st = app.state::<AppState>();
+        format!("l{}", st.term_counter.fetch_add(1, Ordering::SeqCst))
+    };
+    let app_r = app.clone();
+    let sess_r = session.clone();
+    let task = tokio::spawn(async move {
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(msg) => {
+                    let line = String::from_utf8_lossy(&msg.into_bytes()).to_string();
+                    let _ = app_r.emit(&format!("log-data-{sess_r}"), line);
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = app_r.emit(&format!("log-exit-{sess_r}"), ());
+    });
+
+    if let Ok(mut m) = app.state::<AppState>().log_tasks.lock() {
+        m.insert(session.clone(), task);
+    }
+    Ok(session)
+}
+
+#[tauri::command]
+fn log_stop(st: State<AppState>, session: String) -> Result<(), String> {
+    if let Ok(mut m) = st.log_tasks.lock() {
+        if let Some(h) = m.remove(&session) {
+            h.abort();
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn save_text(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content).map_err(|e| format!("scrittura fallita: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// update container (recreate with the newer image)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn update_container(app: AppHandle, host_id: String, id: String) -> Result<(), String> {
+    ensure_writable(&app.state::<AppState>())?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
+
+    let mut spec = docker::container_config(&docker, &id).await?;
+    // container_config names the clone "<name>-clone"; keep the original name.
+    if let Some(base) = spec.name.strip_suffix("-clone") {
+        spec.name = base.to_string();
+    }
+
+    docker::pull_image(&docker, &spec.image).await?;
+    let _ = docker::container_action(&docker, &id, "stop").await;
+    docker::remove_container(&docker, &id).await?;
+    docker::create_container(&docker, spec, true).await?;
+    Ok(())
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1094,6 +1227,11 @@ pub fn run() {
             remove_schedule,
             toggle_schedule,
             check_image_updates,
+            all_containers,
+            log_start,
+            log_stop,
+            save_text,
+            update_container,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

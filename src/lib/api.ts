@@ -80,7 +80,25 @@ export const api = {
   addSchedule: (schedule: Schedule) => invoke<Schedule[]>("add_schedule", { schedule }),
   removeSchedule: (id: string) => invoke<Schedule[]>("remove_schedule", { id }),
   toggleSchedule: (id: string) => invoke<Schedule[]>("toggle_schedule", { id }),
+
+  allContainers: () => invoke<FlatContainer[]>("all_containers"),
+  logStart: (hostId: string, id: string, tail = "300") =>
+    invoke<string>("log_start", { hostId, id, tail }),
+  logStop: (session: string) => invoke<void>("log_stop", { session }),
+  saveText: (path: string, content: string) =>
+    invoke<void>("save_text", { path, content }),
+  updateContainer: (hostId: string, id: string) =>
+    invoke<void>("update_container", { hostId, id }),
 };
+
+export interface FlatContainer {
+  host_id: string;
+  host_name: string;
+  id: string;
+  name: string;
+  image: string;
+  state: string;
+}
 
 export function humanBytes(n: number): string {
   if (!n || n < 0) return "0 B";

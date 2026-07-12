@@ -13,6 +13,7 @@
   import Events from "./lib/Events.svelte";
   import Maintenance from "./lib/Maintenance.svelte";
   import Schedules from "./lib/Schedules.svelte";
+  import CommandPalette from "./lib/CommandPalette.svelte";
 
   let hosts = $state<Host[]>([]);
   let hostId = $state("local");
@@ -188,7 +189,33 @@
   function refresh() {
     reloadKey++;
   }
+
+  let paletteOpen = $state(false);
+
+  function onKeydown(e: KeyboardEvent) {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      paletteOpen = !paletteOpen;
+    }
+  }
+
+  function paletteNavigate(hid: string | null, v: View, filter?: string) {
+    if (hid) hostId = hid;
+    view = v;
+    query = filter ?? "";
+    reloadKey++;
+  }
+
+  async function paletteAction(hid: string, id: string, action: string) {
+    try {
+      await api.containerAction(hid, id, action);
+    } catch (e) {
+      formError = String(e);
+    }
+  }
 </script>
+
+<svelte:window onkeydown={onKeydown} />
 
 <div class="app">
   <div class="window">
@@ -205,6 +232,7 @@
         {#if settings.read_only}
           <span class="badge offline"><span class="dot"></span>sola lettura</span>
         {/if}
+        <button class="icon-btn" title="Comandi (Ctrl/⌘ K)" style="width:auto;padding:0 10px;font-size:12px;font-weight:600;letter-spacing:0.02em" onclick={() => (paletteOpen = true)}>⌘K</button>
         <button class="icon-btn" title="Aggiorna" onclick={refresh}>⟳</button>
         <button class="icon-btn" title="Tema" onclick={toggleTheme}>
           {settings.theme === "dark" ? "☀" : "☾"}
@@ -237,7 +265,7 @@
 
         <div class="side-foot">
           <b>{hosts.length}</b> host configurati<br />
-          DockOne · v0.6.0
+          DockOne · v0.7.0
         </div>
       </aside>
 
@@ -369,4 +397,14 @@
       </div>
     </div>
   </div>
+{/if}
+
+{#if paletteOpen}
+  <CommandPalette
+    views={NAV}
+    {hosts}
+    onClose={() => (paletteOpen = false)}
+    onNavigate={paletteNavigate}
+    onAction={paletteAction}
+  />
 {/if}

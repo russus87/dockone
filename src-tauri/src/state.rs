@@ -155,6 +155,8 @@ pub struct AppState {
     pub term_counter: AtomicU64,
     /// Rolling resource-usage history keyed by `host_id/container`.
     pub metrics: Mutex<HashMap<String, VecDeque<Sample>>>,
+    /// Live log-follow tasks keyed by session id.
+    pub log_tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl AppState {
@@ -178,6 +180,7 @@ impl AppState {
             execs: tokio::sync::Mutex::new(HashMap::new()),
             term_counter: AtomicU64::new(1),
             metrics: Mutex::new(HashMap::new()),
+            log_tasks: Mutex::new(HashMap::new()),
         }
     }
 

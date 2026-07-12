@@ -19,6 +19,7 @@ DockOne is a cross-platform Docker control center built with **Rust + Tauri v2**
 
 ## ✨ MVP features
 
+- **Command palette (⌘/Ctrl K)** — fuzzy‑jump to any container, host or view across every host, and fire quick actions from the keyboard.
 - **Dashboard** — overview of every host and its containers at a glance.
 - **Multi‑host** — manage local and remote Docker engines side by side.
 - **Container list** — full inventory with live state, image, ports and uptime.
@@ -38,6 +39,8 @@ DockOne is a cross-platform Docker control center built with **Rust + Tauri v2**
 - **Bulk actions** — start / stop / restart / remove many containers at once.
 - **Container control** — start, stop, restart, **pause, unpause, kill**.
 - **Interactive terminal** — a real streaming shell (xterm.js) inside any running container, with live resize and selectable shell.
+- **Live logs** — real‑time follow with filter and download to file.
+- **Update container** — one click pulls the newer image and recreates the container with the same config.
 - **Alerts** — background watcher that fires a desktop notification when a container **crashes or turns unhealthy**.
 - **Health & stacks** — health status badges and docker‑compose project grouping.
 - **Test connection** — probe a host (local or remote) and see its Docker version before saving it.

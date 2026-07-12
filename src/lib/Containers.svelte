@@ -3,6 +3,7 @@
   import type { Container, DeploySpec, Settings } from "./types";
   import DeployModal from "./DeployModal.svelte";
   import TerminalModal from "./TerminalModal.svelte";
+  import LogViewer from "./LogViewer.svelte";
 
   let {
     hostId,
@@ -23,8 +24,7 @@
   let selected = $state<Record<string, boolean>>({});
   let bulkBusy = $state(false);
 
-  let logsFor = $state<Container | null>(null);
-  let logText = $state("");
+  let logFor = $state<Container | null>(null);
   let inspectFor = $state<Container | null>(null);
   let inspectText = $state("");
   let termFor = $state<Container | null>(null);
@@ -158,13 +158,18 @@
     }
   }
 
-  async function openLogs(c: Container) {
-    logsFor = c;
-    logText = "Caricamento…";
+  async function update(c: Container) {
+    if (!confirm(`Aggiornare ${c.name}? Verrà scaricata l'immagine più recente e il container ricreato con la stessa configurazione.`))
+      return;
+    busy = { ...busy, [c.id]: true };
+    error = null;
     try {
-      logText = (await api.containerLogs(hostId, c.id)) || "(nessun log)";
+      await api.updateContainer(hostId, c.id);
+      await load();
     } catch (e) {
-      logText = String(e);
+      error = String(e);
+    } finally {
+      busy = { ...busy, [c.id]: false };
     }
   }
 
@@ -291,9 +296,10 @@
                   <button class="act primary" disabled={busy[c.id]} onclick={() => act(c, "start")}>Start</button>
                   <button class="act danger" disabled={busy[c.id]} onclick={() => remove(c)}>Rimuovi</button>
                 {/if}
-                <button class="act" onclick={() => openLogs(c)}>Logs</button>
+                <button class="act" onclick={() => (logFor = c)}>Logs</button>
                 <button class="act" onclick={() => openInspect(c)}>Inspect</button>
                 <button class="act" onclick={() => clone(c)}>Clona</button>
+                <button class="act" disabled={busy[c.id]} onclick={() => update(c)}>Aggiorna</button>
               </div>
             </td>
           </tr>
@@ -303,16 +309,8 @@
   {/if}
 </div>
 
-{#if logsFor}
-  <div class="overlay" role="presentation" onclick={() => (logsFor = null)}>
-    <div class="modal" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
-      <div class="modal-head">
-        <b>Logs · {logsFor.name}</b>
-        <button class="icon-btn" onclick={() => (logsFor = null)}>✕</button>
-      </div>
-      <div class="modal-body"><pre class="logs">{logText}</pre></div>
-    </div>
-  </div>
+{#if logFor}
+  <LogViewer {hostId} container={logFor} onClose={() => (logFor = null)} />
 {/if}
 
 {#if inspectFor}
