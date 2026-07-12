@@ -22,7 +22,8 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed \
             base-devel git rust nodejs npm \
-            webkit2gtk-4.1 gtk3 librsvg patchelf openssl sudo
+            webkit2gtk-4.1 gtk3 libappindicator-gtk3 \
+            librsvg patchelf openssl sudo
 
       - uses: actions/checkout@v4
 
