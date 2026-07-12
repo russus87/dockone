@@ -7,8 +7,11 @@ import type {
   Host,
   HostSummary,
   Image,
+  ImageUpdate,
   Network,
   PruneResult,
+  Schedule,
+  Series,
   Settings,
   Stat,
   Volume,
@@ -68,6 +71,15 @@ export const api = {
     invoke<DeploySpec>("container_config", { hostId, id }),
   composeAction: (hostId: string, project: string, action: string) =>
     invoke<string>("compose_action", { hostId, project, action }),
+
+  metricsHistory: (hostId: string) => invoke<Series[]>("metrics_history", { hostId }),
+  checkImageUpdates: (hostId: string) =>
+    invoke<ImageUpdate[]>("check_image_updates", { hostId }),
+
+  listSchedules: () => invoke<Schedule[]>("list_schedules"),
+  addSchedule: (schedule: Schedule) => invoke<Schedule[]>("add_schedule", { schedule }),
+  removeSchedule: (id: string) => invoke<Schedule[]>("remove_schedule", { id }),
+  toggleSchedule: (id: string) => invoke<Schedule[]>("toggle_schedule", { id }),
 };
 
 export function humanBytes(n: number): string {

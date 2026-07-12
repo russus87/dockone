@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
@@ -7,6 +7,39 @@ use std::sync::Mutex;
 use bollard::Docker;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWrite;
+
+/// A single point in a container's resource-usage history.
+#[derive(Debug, Clone, Serialize)]
+pub struct Sample {
+    pub t: i64,
+    pub cpu: f64,
+    pub mem: i64,
+    pub mem_limit: i64,
+}
+
+/// A planned start/stop/restart action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Schedule {
+    pub id: String,
+    pub host_id: String,
+    pub host_name: String,
+    pub container: String,
+    pub action: String,
+    /// `daily` (fires at `time`) or `interval` (every `every_min` minutes).
+    pub kind: String,
+    #[serde(default)]
+    pub time: String,
+    #[serde(default)]
+    pub every_min: u64,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub last_run: i64,
+}
+
+fn default_true() -> bool {
+    true
+}
 
 /// A Docker endpoint the user manages — the local socket or a remote host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +79,9 @@ pub struct Settings {
     pub alerts_enabled: bool,
     #[serde(default = "default_poll")]
     pub alert_poll_secs: u64,
+    /// Record resource-usage history in the background.
+    #[serde(default = "default_true")]
+    pub metrics_enabled: bool,
 }
 
 fn default_theme() -> String {
@@ -64,6 +100,7 @@ impl Default for Settings {
             favorite_containers: Vec::new(),
             alerts_enabled: false,
             alert_poll_secs: default_poll(),
+            metrics_enabled: true,
         }
     }
 }
@@ -74,6 +111,8 @@ pub struct PersistedData {
     pub hosts: Vec<Host>,
     #[serde(default)]
     pub settings: Settings,
+    #[serde(default)]
+    pub schedules: Vec<Schedule>,
 }
 
 impl Default for PersistedData {
@@ -81,6 +120,7 @@ impl Default for PersistedData {
         PersistedData {
             hosts: vec![Host::local()],
             settings: Settings::default(),
+            schedules: Vec::new(),
         }
     }
 }
@@ -113,6 +153,8 @@ pub struct AppState {
     pub execs: tokio::sync::Mutex<HashMap<String, ExecSession>>,
     /// Monotonic counter for terminal session ids.
     pub term_counter: AtomicU64,
+    /// Rolling resource-usage history keyed by `host_id/container`.
+    pub metrics: Mutex<HashMap<String, VecDeque<Sample>>>,
 }
 
 impl AppState {
@@ -135,6 +177,7 @@ impl AppState {
             tunnels: Mutex::new(HashMap::new()),
             execs: tokio::sync::Mutex::new(HashMap::new()),
             term_counter: AtomicU64::new(1),
+            metrics: Mutex::new(HashMap::new()),
         }
     }
 

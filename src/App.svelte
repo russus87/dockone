@@ -9,8 +9,10 @@
   import Volumes from "./lib/Volumes.svelte";
   import Networks from "./lib/Networks.svelte";
   import Stats from "./lib/Stats.svelte";
+  import Metrics from "./lib/Metrics.svelte";
   import Events from "./lib/Events.svelte";
   import Maintenance from "./lib/Maintenance.svelte";
+  import Schedules from "./lib/Schedules.svelte";
 
   let hosts = $state<Host[]>([]);
   let hostId = $state("local");
@@ -22,6 +24,7 @@
     favorite_containers: [],
     alerts_enabled: false,
     alert_poll_secs: 30,
+    metrics_enabled: true,
   });
   let showSettings = $state(false);
   let reloadKey = $state(0);
@@ -37,10 +40,12 @@
     { id: "dashboard", label: "Dashboard", ico: "◉" },
     { id: "containers", label: "Container", ico: "▤" },
     { id: "stats", label: "Live Stats", ico: "◧" },
+    { id: "metrics", label: "Metriche", ico: "◠" },
     { id: "images", label: "Immagini", ico: "◈" },
     { id: "volumes", label: "Volumi", ico: "⛁" },
     { id: "networks", label: "Reti", ico: "⇄" },
     { id: "events", label: "Eventi", ico: "⧗" },
+    { id: "schedules", label: "Pianificazioni", ico: "⏱" },
     { id: "maintenance", label: "Manutenzione", ico: "⚑" },
   ];
 
@@ -48,10 +53,12 @@
     dashboard: "Dashboard",
     containers: "Container",
     stats: "Live Stats",
+    metrics: "Metriche",
     images: "Immagini",
     volumes: "Volumi",
     networks: "Reti",
     events: "Eventi",
+    schedules: "Pianificazioni",
     maintenance: "Manutenzione",
   };
 
@@ -63,10 +70,12 @@
     dashboard: "Panoramica di tutti i tuoi host Docker",
     containers: `Container su ${hostName}`,
     stats: `Utilizzo risorse in tempo reale · ${hostName}`,
+    metrics: `Storico CPU e memoria · ${hostName}`,
     images: `Immagini su ${hostName}`,
     volumes: `Volumi su ${hostName}`,
     networks: `Reti su ${hostName}`,
     events: `Timeline eventi Docker · ${hostName}`,
+    schedules: "Azioni pianificate su tutti gli host",
     maintenance: `Disk usage e pulizia · ${hostName}`,
   });
 
@@ -228,7 +237,7 @@
 
         <div class="side-foot">
           <b>{hosts.length}</b> host configurati<br />
-          DockOne · v0.5.0
+          DockOne · v0.6.0
         </div>
       </aside>
 
@@ -245,6 +254,8 @@
             <Containers {hostId} {query} {settings} onSettings={(s) => (settings = s)} />
           {:else if view === "stats"}
             <Stats {hostId} {query} />
+          {:else if view === "metrics"}
+            <Metrics {hostId} {query} />
           {:else if view === "images"}
             <Images {hostId} {query} />
           {:else if view === "volumes"}
@@ -253,6 +264,8 @@
             <Networks {hostId} {query} />
           {:else if view === "events"}
             <Events {hostId} {query} />
+          {:else if view === "schedules"}
+            <Schedules {hosts} />
           {:else if view === "maintenance"}
             <Maintenance {hostId} />
           {/if}

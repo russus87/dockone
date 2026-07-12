@@ -1,4 +1,5 @@
 mod docker;
+mod registry;
 mod ssh;
 mod state;
 
@@ -15,7 +16,7 @@ use docker::{
     ContainerDto, DeploySpec, DfDto, EventDto, HostSummary, ImageDto, NetworkDto, PruneResult,
     StatDto, VolumeDto,
 };
-use state::{AppState, ExecSession, Host, PersistedData, Settings, Tunnel};
+use state::{AppState, ExecSession, Host, PersistedData, Sample, Schedule, Settings, Tunnel};
 
 // ---------------------------------------------------------------------------
 // connection resolution
@@ -690,6 +691,242 @@ async fn compose_action(
 }
 
 // ---------------------------------------------------------------------------
+// metrics history
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct Series {
+    name: String,
+    points: Vec<Sample>,
+}
+
+#[tauri::command]
+fn metrics_history(app: AppHandle, host_id: String) -> Result<Vec<Series>, String> {
+    let st = app.state::<AppState>();
+    let m = st.metrics.lock().map_err(|_| "stato bloccato")?;
+    let prefix = format!("{host_id}/");
+    let mut out: Vec<Series> = m
+        .iter()
+        .filter(|(k, _)| k.starts_with(&prefix))
+        .map(|(k, v)| Series {
+            name: k[prefix.len()..].to_string(),
+            points: v.iter().cloned().collect(),
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// Background sampler: every 10s record CPU/mem for running containers on the
+/// hosts we already hold a connection to.
+async fn metrics_loop(app: AppHandle) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+        let enabled = app
+            .state::<AppState>()
+            .data
+            .lock()
+            .map(|d| d.settings.metrics_enabled)
+            .unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+
+        let host_ids: Vec<String> = app
+            .state::<AppState>()
+            .conns
+            .lock()
+            .map(|c| c.keys().cloned().collect())
+            .unwrap_or_default();
+        let t = now_unix();
+
+        for hid in host_ids {
+            let docker = match resolve(&app.state::<AppState>(), &hid).await {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if let Ok(stats) = docker::container_stats(&docker).await {
+                if let Ok(mut m) = app.state::<AppState>().metrics.lock() {
+                    for s in stats {
+                        let buf = m.entry(format!("{hid}/{}", s.name)).or_default();
+                        buf.push_back(Sample {
+                            t,
+                            cpu: s.cpu_percent,
+                            mem: s.mem_used,
+                            mem_limit: s.mem_limit,
+                        });
+                        while buf.len() > 360 {
+                            buf.pop_front();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// scheduled tasks
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn list_schedules(st: State<AppState>) -> Result<Vec<Schedule>, String> {
+    Ok(st.data.lock().map_err(|_| "stato bloccato")?.schedules.clone())
+}
+
+#[tauri::command]
+fn add_schedule(st: State<AppState>, schedule: Schedule) -> Result<Vec<Schedule>, String> {
+    {
+        let mut d = st.data.lock().map_err(|_| "stato bloccato")?;
+        let mut s = schedule;
+        s.id = format!("s{}-{}", now_unix(), d.schedules.len());
+        s.last_run = 0;
+        d.schedules.push(s);
+    }
+    st.save();
+    list_schedules(st)
+}
+
+#[tauri::command]
+fn remove_schedule(st: State<AppState>, id: String) -> Result<Vec<Schedule>, String> {
+    {
+        let mut d = st.data.lock().map_err(|_| "stato bloccato")?;
+        d.schedules.retain(|s| s.id != id);
+    }
+    st.save();
+    list_schedules(st)
+}
+
+#[tauri::command]
+fn toggle_schedule(st: State<AppState>, id: String) -> Result<Vec<Schedule>, String> {
+    {
+        let mut d = st.data.lock().map_err(|_| "stato bloccato")?;
+        if let Some(s) = d.schedules.iter_mut().find(|s| s.id == id) {
+            s.enabled = !s.enabled;
+        }
+    }
+    st.save();
+    list_schedules(st)
+}
+
+/// Background scheduler: every 30s run any due start/stop/restart.
+async fn scheduler_loop(app: AppHandle) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+        let snapshot = app
+            .state::<AppState>()
+            .data
+            .lock()
+            .map(|d| (d.schedules.clone(), d.settings.read_only))
+            .ok();
+        let (schedules, read_only) = match snapshot {
+            Some(x) => x,
+            None => continue,
+        };
+        if read_only {
+            continue;
+        }
+
+        let now = chrono::Local::now();
+        let hhmm = now.format("%H:%M").to_string();
+        let now_s = now_unix();
+
+        for sched in schedules {
+            if !sched.enabled {
+                continue;
+            }
+            let due = match sched.kind.as_str() {
+                "daily" => sched.time == hhmm && (now_s - sched.last_run) > 90,
+                "interval" => {
+                    sched.every_min > 0 && (now_s - sched.last_run) >= (sched.every_min as i64 * 60)
+                }
+                _ => false,
+            };
+            if !due {
+                continue;
+            }
+
+            let ran = match resolve(&app.state::<AppState>(), &sched.host_id).await {
+                Ok(docker) => docker::container_action(&docker, &sched.container, &sched.action)
+                    .await
+                    .is_ok(),
+                Err(_) => false,
+            };
+
+            if let Ok(mut d) = app.state::<AppState>().data.lock() {
+                if let Some(s) = d.schedules.iter_mut().find(|s| s.id == sched.id) {
+                    s.last_run = now_s;
+                }
+            }
+            app.state::<AppState>().save();
+
+            if ran {
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("DockOne · pianificazione")
+                    .body(format!(
+                        "{} · {} su {}",
+                        sched.action, sched.container, sched.host_name
+                    ))
+                    .show();
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// image update checker
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct ImageUpdate {
+    tag: String,
+    up_to_date: Option<bool>,
+    error: Option<String>,
+}
+
+#[tauri::command]
+async fn check_image_updates(app: AppHandle, host_id: String) -> Result<Vec<ImageUpdate>, String> {
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
+    let images = docker::list_images(&docker).await?;
+    let tags: Vec<String> = images
+        .into_iter()
+        .filter_map(|i| i.tags.into_iter().next())
+        .filter(|t| t != "<none>:<none>")
+        .collect();
+
+    let futs = tags.into_iter().map(|tag| {
+        let docker = docker.clone();
+        async move {
+            let local = docker::image_local_digest(&docker, &tag).await;
+            match registry::latest_digest(&tag).await {
+                Ok(remote) => ImageUpdate {
+                    up_to_date: local.map(|l| l == remote),
+                    error: None,
+                    tag,
+                },
+                Err(e) => ImageUpdate {
+                    tag,
+                    up_to_date: None,
+                    error: Some(e),
+                },
+            }
+        }
+    });
+    Ok(join_all(futs).await)
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
@@ -851,10 +1088,18 @@ pub fn run() {
             term_write,
             term_resize,
             term_close,
+            metrics_history,
+            list_schedules,
+            add_schedule,
+            remove_schedule,
+            toggle_schedule,
+            check_image_updates,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
-            tauri::async_runtime::spawn(alert_loop(handle));
+            tauri::async_runtime::spawn(alert_loop(handle.clone()));
+            tauri::async_runtime::spawn(metrics_loop(handle.clone()));
+            tauri::async_runtime::spawn(scheduler_loop(handle));
             Ok(())
         })
         .run(tauri::generate_context!())

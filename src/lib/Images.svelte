@@ -10,6 +10,8 @@
   let pullName = $state("");
   let pulling = $state(false);
   let busy = $state<Record<string, boolean>>({});
+  let checking = $state(false);
+  let updates = $state<Record<string, { up: boolean | null; error: string | null }>>({});
 
   async function load() {
     loading = true;
@@ -44,6 +46,21 @@
     }
   }
 
+  async function checkUpdates() {
+    checking = true;
+    error = null;
+    try {
+      const res = await api.checkImageUpdates(hostId);
+      const map: Record<string, { up: boolean | null; error: string | null }> = {};
+      for (const u of res) map[u.tag] = { up: u.up_to_date, error: u.error };
+      updates = map;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      checking = false;
+    }
+  }
+
   async function remove(i: Image) {
     if (!confirm(`Rimuovere l'immagine ${i.tags[0] ?? i.id}?`)) return;
     busy = { ...busy, [i.id]: true };
@@ -70,6 +87,7 @@
   <div class="host-form" style="margin-bottom:16px">
     <input placeholder="Pull immagine — es. nginx:latest, ghcr.io/owner/app:tag" bind:value={pullName} onkeydown={(e) => e.key === "Enter" && pull()} />
     <button class="btn" disabled={pulling} onclick={pull}>{pulling ? "Download…" : "Pull"}</button>
+    <button class="btn ghost" disabled={checking} onclick={checkUpdates}>{checking ? "Controllo…" : "Controlla aggiornamenti"}</button>
   </div>
 
   {#if error}<div class="err-banner">{error}</div>{/if}
@@ -85,6 +103,7 @@
           <th>Image ID</th>
           <th>Dimensione</th>
           <th>Creata</th>
+          <th>Aggiornamento</th>
           <th style="text-align:right">Azioni</th>
         </tr>
       </thead>
@@ -101,6 +120,19 @@
             <td class="mono">{i.id}</td>
             <td class="mono">{humanBytes(i.size)}</td>
             <td class="mono">{ago(i.created)}</td>
+            <td>
+              {#if i.tags[0] && updates[i.tags[0]]}
+                {#if updates[i.tags[0]].up === false}
+                  <span class="badge paused"><span class="dot"></span>aggiornamento</span>
+                {:else if updates[i.tags[0]].up === true}
+                  <span class="badge running"><span class="dot"></span>aggiornato</span>
+                {:else}
+                  <span class="badge offline" title={updates[i.tags[0]].error ?? ""}>?</span>
+                {/if}
+              {:else}
+                <span class="mono" style="color:var(--text-faint)">—</span>
+              {/if}
+            </td>
             <td style="text-align:right">
               <button class="act danger" disabled={busy[i.id]} onclick={() => remove(i)}>Rimuovi</button>
             </td>

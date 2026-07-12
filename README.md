@@ -26,6 +26,9 @@ DockOne is a cross-platform Docker control center built with **Rust + Tauri v2**
 - **Logs** — inspect the tail of a container's stdout/stderr.
 - **Inspect** — complete configuration & metadata as raw JSON.
 - **Live Stats** — real‑time CPU %, memory, network and disk I/O per container, auto‑refreshing.
+- **Metrics history** — background sampler + inline CPU/memory charts per container over time.
+- **Scheduled tasks** — planned start / stop / restart, daily at a time or on an interval, with desktop notifications.
+- **Image update checker** — query the registry and flag images that have a newer version than the local one.
 - **Events timeline** — the last hours of Docker events (create/start/die/pull…) colour‑coded.
 - **Image manager** — list, **pull** from any registry, and remove images.
 - **Volume / Network managers** — browse and remove Docker resources.
@@ -44,7 +47,7 @@ DockOne is a cross-platform Docker control center built with **Rust + Tauri v2**
 - **Read‑only mode** — safe monitoring that blocks mutating actions.
 - **Dark / Light theme** — system‑grade look in both.
 
-> DockOne is designed to grow into a full infrastructure cockpit — scheduled tasks, metrics history, image update checks and Pro integrations (Portainer, Prometheus, Grafana, Kubernetes, Proxmox…) are on the roadmap.
+> DockOne is designed to grow into a full infrastructure cockpit — Pro integrations (Portainer, Prometheus, Grafana, Kubernetes, Proxmox…), webhooks and a plugin system are on the roadmap.
 
 ## 🖥️ Connecting to hosts
 

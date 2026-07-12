@@ -896,6 +896,14 @@ pub async fn compose_meta(
     Ok((files, workdir))
 }
 
+/// The locally-pulled content digest (`sha256:…`) for an image tag, if known.
+pub async fn image_local_digest(docker: &Docker, tag: &str) -> Option<String> {
+    let d = docker.inspect_image(tag).await.ok()?;
+    d.repo_digests?
+        .into_iter()
+        .find_map(|e| e.split('@').nth(1).map(|s| s.to_string()))
+}
+
 fn parse_health(status: &str) -> String {
     let s = status.to_lowercase();
     if s.contains("unhealthy") {

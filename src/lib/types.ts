@@ -11,6 +11,38 @@ export interface Settings {
   favorite_containers: string[];
   alerts_enabled: boolean;
   alert_poll_secs: number;
+  metrics_enabled: boolean;
+}
+
+export interface Sample {
+  t: number;
+  cpu: number;
+  mem: number;
+  mem_limit: number;
+}
+
+export interface Series {
+  name: string;
+  points: Sample[];
+}
+
+export interface Schedule {
+  id: string;
+  host_id: string;
+  host_name: string;
+  container: string;
+  action: string;
+  kind: string; // daily | interval
+  time: string; // HH:MM
+  every_min: number;
+  enabled: boolean;
+  last_run: number;
+}
+
+export interface ImageUpdate {
+  tag: string;
+  up_to_date: boolean | null;
+  error: string | null;
 }
 
 export interface PortMap {
@@ -124,5 +156,7 @@ export type View =
   | "volumes"
   | "networks"
   | "stats"
+  | "metrics"
   | "events"
-  | "maintenance";
+  | "maintenance"
+  | "schedules";
