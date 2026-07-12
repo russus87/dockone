@@ -1,4 +1,5 @@
 mod docker;
+mod ssh;
 mod state;
 
 use bollard::Docker;
@@ -10,21 +11,16 @@ use docker::{
     ContainerDto, DeploySpec, DfDto, EventDto, HostSummary, ImageDto, NetworkDto, PruneResult,
     StatDto, VolumeDto,
 };
-use state::{AppState, Host, PersistedData, Settings};
+use state::{AppState, Host, PersistedData, Settings, Tunnel};
 
 // ---------------------------------------------------------------------------
 // connection resolution
 // ---------------------------------------------------------------------------
 
 /// Resolve a live Docker handle for `host_id`, reusing the cached connection.
-fn resolve(app_state: &AppState, host_id: &str) -> Result<Docker, String> {
-    // fast path: already connected
-    if let Ok(cache) = app_state.conns.lock() {
-        if let Some(d) = cache.get(host_id) {
-            return Ok(d.clone());
-        }
-    }
-
+/// For `ssh://` hosts this first ensures an SSH tunnel is up and connects to
+/// the resulting local endpoint.
+async fn resolve(app_state: &AppState, host_id: &str) -> Result<Docker, String> {
     let host = {
         let d = app_state.data.lock().map_err(|_| "stato bloccato")?;
         d.hosts
@@ -34,11 +30,70 @@ fn resolve(app_state: &AppState, host_id: &str) -> Result<Docker, String> {
             .ok_or_else(|| format!("host «{host_id}» non trovato"))?
     };
 
-    let docker = docker::connect(&host)?;
+    // Resolve the effective endpoint (SSH hosts tunnel to a local tcp port).
+    let endpoint = if host.endpoint.trim().starts_with("ssh://") {
+        ensure_tunnel(app_state, &host).await?
+    } else {
+        host.endpoint.clone()
+    };
+
+    // fast path: already connected (ensure_tunnel invalidates this on respawn)
+    if let Ok(cache) = app_state.conns.lock() {
+        if let Some(d) = cache.get(host_id) {
+            return Ok(d.clone());
+        }
+    }
+
+    let effective = Host {
+        id: host.id.clone(),
+        name: host.name.clone(),
+        endpoint,
+        favorite: host.favorite,
+    };
+    let docker = docker::connect(&effective)?;
     if let Ok(mut cache) = app_state.conns.lock() {
         cache.insert(host_id.to_string(), docker.clone());
     }
     Ok(docker)
+}
+
+/// Ensure a live SSH tunnel exists for `host` and return its local `tcp://`
+/// endpoint, (re)spawning `ssh` if needed.
+async fn ensure_tunnel(app_state: &AppState, host: &Host) -> Result<String, String> {
+    // reuse an existing, still-running tunnel
+    if let Ok(mut tunnels) = app_state.tunnels.lock() {
+        if let Some(t) = tunnels.get_mut(&host.id) {
+            match t.child.try_wait() {
+                Ok(None) => return Ok(t.endpoint.clone()), // still alive
+                _ => {
+                    // dead → drop it and invalidate the cached connection
+                    tunnels.remove(&host.id);
+                    if let Ok(mut c) = app_state.conns.lock() {
+                        c.remove(&host.id);
+                    }
+                }
+            }
+        }
+    }
+
+    let ep = host.endpoint.clone();
+    let (child, endpoint) = tokio::task::spawn_blocking(move || ssh::open(&ep))
+        .await
+        .map_err(|e| e.to_string())??;
+
+    if let Ok(mut tunnels) = app_state.tunnels.lock() {
+        tunnels.insert(
+            host.id.clone(),
+            Tunnel {
+                child,
+                endpoint: endpoint.clone(),
+            },
+        );
+    }
+    if let Ok(mut c) = app_state.conns.lock() {
+        c.remove(&host.id);
+    }
+    Ok(endpoint)
 }
 
 fn ensure_writable(app_state: &AppState) -> Result<(), String> {
@@ -67,9 +122,28 @@ fn list_hosts(st: State<AppState>) -> Result<Vec<Host>, String> {
 /// `http://` endpoint has no explicit port, the default 2375 is assumed.
 #[tauri::command]
 async fn test_host(name: Option<String>, endpoint: String) -> Result<String, String> {
+    let display = name.unwrap_or_else(|| "test".into());
+
+    // SSH: open a throwaway tunnel, ping through it, then tear it down.
+    if endpoint.trim().starts_with("ssh://") {
+        let ep = endpoint.trim().to_string();
+        let (mut child, tcp) = tokio::task::spawn_blocking(move || ssh::open(&ep))
+            .await
+            .map_err(|e| e.to_string())??;
+        let host = Host {
+            id: "__probe__".into(),
+            name: display,
+            endpoint: tcp,
+            favorite: false,
+        };
+        let res = docker::ping(&host).await;
+        let _ = child.kill();
+        return res;
+    }
+
     let host = Host {
         id: "__probe__".into(),
-        name: name.unwrap_or_else(|| "test".into()),
+        name: display,
         endpoint: normalize_probe(&endpoint),
         favorite: false,
     };
@@ -124,6 +198,11 @@ fn remove_host(st: State<AppState>, id: String) -> Result<Vec<Host>, String> {
     }
     if let Ok(mut c) = st.conns.lock() {
         c.remove(&id);
+    }
+    if let Ok(mut t) = st.tunnels.lock() {
+        if let Some(mut tun) = t.remove(&id) {
+            let _ = tun.child.kill();
+        }
     }
     st.save();
     list_hosts(st)
@@ -235,7 +314,7 @@ async fn dashboard(app: tauri::AppHandle) -> Result<Vec<HostSummary>, String> {
     let futures = hosts.into_iter().map(|host| {
         let st = app.state::<AppState>();
         async move {
-            match resolve(&st, &host.id) {
+            match resolve(&st, &host.id).await {
                 Ok(docker) => docker::host_summary(&host, &docker).await,
                 Err(e) => HostSummary {
                     id: host.id.clone(),
@@ -261,25 +340,25 @@ async fn dashboard(app: tauri::AppHandle) -> Result<Vec<HostSummary>, String> {
 
 #[tauri::command]
 async fn get_containers(app: tauri::AppHandle, host_id: String) -> Result<Vec<ContainerDto>, String> {
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::list_containers(&docker).await
 }
 
 #[tauri::command]
 async fn get_images(app: tauri::AppHandle, host_id: String) -> Result<Vec<ImageDto>, String> {
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::list_images(&docker).await
 }
 
 #[tauri::command]
 async fn get_volumes(app: tauri::AppHandle, host_id: String) -> Result<Vec<VolumeDto>, String> {
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::list_volumes(&docker).await
 }
 
 #[tauri::command]
 async fn get_networks(app: tauri::AppHandle, host_id: String) -> Result<Vec<NetworkDto>, String> {
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::list_networks(&docker).await
 }
 
@@ -291,7 +370,7 @@ async fn container_action(
     action: String,
 ) -> Result<(), String> {
     ensure_writable(&app.state::<AppState>())?;
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::container_action(&docker, &id, &action).await
 }
 
@@ -302,7 +381,7 @@ async fn container_logs(
     id: String,
     tail: Option<String>,
 ) -> Result<String, String> {
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::container_logs(&docker, &id, tail.as_deref().unwrap_or("200")).await
 }
 
@@ -312,13 +391,13 @@ async fn inspect_container(
     host_id: String,
     id: String,
 ) -> Result<serde_json::Value, String> {
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::inspect_container(&docker, &id).await
 }
 
 #[tauri::command]
 async fn container_stats(app: tauri::AppHandle, host_id: String) -> Result<Vec<StatDto>, String> {
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::container_stats(&docker).await
 }
 
@@ -328,55 +407,55 @@ async fn recent_events(app: tauri::AppHandle, host_id: String) -> Result<Vec<Eve
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::recent_events(&docker, now - 6 * 3600, now).await
 }
 
 #[tauri::command]
 async fn system_df(app: tauri::AppHandle, host_id: String) -> Result<DfDto, String> {
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::system_df(&docker).await
 }
 
 #[tauri::command]
 async fn prune(app: tauri::AppHandle, host_id: String, kind: String) -> Result<PruneResult, String> {
     ensure_writable(&app.state::<AppState>())?;
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::prune(&docker, &kind).await
 }
 
 #[tauri::command]
 async fn pull_image(app: tauri::AppHandle, host_id: String, image: String) -> Result<(), String> {
     ensure_writable(&app.state::<AppState>())?;
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::pull_image(&docker, &image).await
 }
 
 #[tauri::command]
 async fn remove_container(app: tauri::AppHandle, host_id: String, id: String) -> Result<(), String> {
     ensure_writable(&app.state::<AppState>())?;
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::remove_container(&docker, &id).await
 }
 
 #[tauri::command]
 async fn remove_image(app: tauri::AppHandle, host_id: String, id: String) -> Result<(), String> {
     ensure_writable(&app.state::<AppState>())?;
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::remove_image(&docker, &id).await
 }
 
 #[tauri::command]
 async fn remove_volume(app: tauri::AppHandle, host_id: String, name: String) -> Result<(), String> {
     ensure_writable(&app.state::<AppState>())?;
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::remove_volume(&docker, &name).await
 }
 
 #[tauri::command]
 async fn remove_network(app: tauri::AppHandle, host_id: String, id: String) -> Result<(), String> {
     ensure_writable(&app.state::<AppState>())?;
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::remove_network(&docker, &id).await
 }
 
@@ -388,7 +467,7 @@ async fn exec_run(
     cmd: String,
 ) -> Result<String, String> {
     ensure_writable(&app.state::<AppState>())?;
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::exec_run(&docker, &id, &cmd).await
 }
 
@@ -400,7 +479,7 @@ async fn deploy_container(
     autostart: bool,
 ) -> Result<String, String> {
     ensure_writable(&app.state::<AppState>())?;
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::create_container(&docker, spec, autostart).await
 }
 
@@ -410,8 +489,71 @@ async fn container_config(
     host_id: String,
     id: String,
 ) -> Result<DeploySpec, String> {
-    let docker = resolve(&app.state::<AppState>(), &host_id)?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
     docker::container_config(&docker, &id).await
+}
+
+/// Run a `docker compose` action on a detected stack. Local host only: the
+/// compose files live on the machine running DockOne.
+#[tauri::command]
+async fn compose_action(
+    app: tauri::AppHandle,
+    host_id: String,
+    project: String,
+    action: String,
+) -> Result<String, String> {
+    ensure_writable(&app.state::<AppState>())?;
+
+    let endpoint = {
+        let st = app.state::<AppState>();
+        let d = st.data.lock().map_err(|_| "stato bloccato")?;
+        d.hosts
+            .iter()
+            .find(|h| h.id == host_id)
+            .map(|h| h.endpoint.clone())
+            .ok_or_else(|| format!("host «{host_id}» non trovato"))?
+    };
+    let local = endpoint.is_empty() || endpoint == "local" || endpoint.starts_with("unix://");
+    if !local {
+        return Err("Compose è disponibile solo sull'host locale in questa versione".into());
+    }
+
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
+    let (files, workdir) = docker::compose_meta(&docker, &project).await?;
+
+    let mut args: Vec<String> = vec!["compose".into(), "-p".into(), project.clone()];
+    for f in &files {
+        args.push("-f".into());
+        args.push(f.clone());
+    }
+    match action.as_str() {
+        "up" => {
+            args.push("up".into());
+            args.push("-d".into());
+        }
+        "down" => args.push("down".into()),
+        "stop" => args.push("stop".into()),
+        "start" => args.push("start".into()),
+        "restart" => args.push("restart".into()),
+        other => return Err(format!("azione compose sconosciuta: {other}")),
+    }
+
+    let mut cmd = tokio::process::Command::new("docker");
+    cmd.args(&args);
+    if let Some(wd) = &workdir {
+        cmd.current_dir(wd);
+    }
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("«docker compose» non disponibile: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() {
+        Ok(format!("{stdout}{stderr}").trim().to_string())
+    } else {
+        Err(format!("{stderr}{stdout}").trim().to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -450,14 +592,9 @@ async fn alert_loop(app: AppHandle) {
         };
 
         for host in hosts {
-            // Resolve the connection in a scope that ends before the await, so
-            // the borrow of `app` (via State) never crosses the await point.
-            let docker = {
-                let st = app.state::<AppState>();
-                resolve(&st, &host.id)
-            };
-            let Ok(docker) = docker else {
-                continue;
+            let docker = match resolve(&app.state::<AppState>(), &host.id).await {
+                Ok(d) => d,
+                Err(_) => continue,
             };
             let Ok(list) = docker::list_containers(&docker).await else {
                 continue;
@@ -576,6 +713,7 @@ pub fn run() {
             exec_run,
             deploy_container,
             container_config,
+            compose_action,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

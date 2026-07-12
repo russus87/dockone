@@ -228,7 +228,7 @@
 
         <div class="side-foot">
           <b>{hosts.length}</b> host configurati<br />
-          DockOne · v0.3.2
+          DockOne · v0.4.0
         </div>
       </aside>
 
@@ -313,8 +313,9 @@
         <p class="meta">
           Endpoint supportati: <span class="mono">local</span>,
           <span class="mono">tcp://host:2375</span>,
-          <span class="mono">unix:///path/docker.sock</span>.
-          Il test usa la porta 2375 se non la specifichi.
+          <span class="mono">unix:///path/docker.sock</span>,
+          <span class="mono">ssh://user@host</span> (tunnel automatico, richiede chiave SSH).
+          Il test tcp usa la porta 2375 se non la specifichi.
         </p>
 
         <div class="section-title" style="margin-top:22px">Preferenze</div>

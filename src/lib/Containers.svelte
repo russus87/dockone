@@ -35,6 +35,9 @@
   let deployInitial = $state<DeploySpec | null>(null);
   let deployTitle = $state("Deploy container");
 
+  let composeBusy = $state<string | null>(null);
+  let composeMsg = $state<{ ok: boolean; text: string } | null>(null);
+
   async function load() {
     loading = true;
     error = null;
@@ -109,6 +112,25 @@
     deployOpen = false;
     load();
   }
+
+  async function stackAction(project: string, action: string) {
+    if (action === "down" && !confirm(`Eseguire «down» dello stack ${project}?`)) return;
+    composeBusy = `${project}:${action}`;
+    composeMsg = null;
+    try {
+      const out = await api.composeAction(hostId, project, action);
+      composeMsg = { ok: true, text: `${project}: ${action} completato${out ? " — " + out.split("\n")[0] : ""}` };
+      await load();
+    } catch (e) {
+      composeMsg = { ok: false, text: String(e) };
+    } finally {
+      composeBusy = null;
+    }
+  }
+
+  const stacks = $derived(
+    [...new Set(items.map((c) => c.compose).filter((p): p is string => !!p))].sort(),
+  );
 
   const selectedIds = $derived(Object.keys(selected).filter((id) => selected[id]));
 
@@ -204,6 +226,24 @@
   <div style="display:flex;justify-content:flex-end;margin-bottom:14px">
     <button class="btn" onclick={openDeploy}>＋ Deploy container</button>
   </div>
+
+  {#if hostId === "local" && stacks.length > 0}
+    <div class="stacks">
+      <span class="section-label" style="margin:0 6px 0 0">Stack Compose</span>
+      {#each stacks as p (p)}
+        <div class="stackchip">
+          <b>{p}</b>
+          <button class="act primary" disabled={composeBusy?.startsWith(p + ':')} onclick={() => stackAction(p, "up")}>Up</button>
+          <button class="act" disabled={composeBusy?.startsWith(p + ':')} onclick={() => stackAction(p, "restart")}>Restart</button>
+          <button class="act danger" disabled={composeBusy?.startsWith(p + ':')} onclick={() => stackAction(p, "stop")}>Stop</button>
+          <button class="act danger" disabled={composeBusy?.startsWith(p + ':')} onclick={() => stackAction(p, "down")}>Down</button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+  {#if composeMsg}
+    <div class={composeMsg.ok ? "ok-banner" : "err-banner"}>{composeMsg.ok ? "✓ " : "✗ "}{composeMsg.text}</div>
+  {/if}
 
   {#if error}<div class="err-banner">{error}</div>{/if}
 
@@ -346,5 +386,26 @@
   .bulkbar b {
     margin-right: 6px;
     color: var(--accent);
+  }
+  .stacks {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .stackchip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 6px 8px 6px 12px;
+    box-shadow: var(--shadow-card);
+  }
+  .stackchip b {
+    margin-right: 4px;
+    font-size: 13px;
   }
 </style>

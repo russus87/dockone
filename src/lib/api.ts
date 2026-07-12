@@ -66,6 +66,8 @@ export const api = {
     invoke<string>("deploy_container", { hostId, spec, autostart }),
   containerConfig: (hostId: string, id: string) =>
     invoke<DeploySpec>("container_config", { hostId, id }),
+  composeAction: (hostId: string, project: string, action: string) =>
+    invoke<string>("compose_action", { hostId, project, action }),
 };
 
 export function humanBytes(n: number): string {

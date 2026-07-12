@@ -53,6 +53,9 @@ DockOne is a cross-platform Docker control center built with **Rust + Tauri v2**
 | Local socket (default) | `local` |
 | Unix socket | `unix:///var/run/docker.sock` |
 | Remote TCP | `tcp://10.0.0.5:2375` |
+| **SSH (auto tunnel)** | `ssh://user@server` |
+
+SSH hosts open an automatic port-forward to the remote Docker socket using your SSH keys/agent — no need to expose the Docker API. Compose stack actions (**up / down / restart / stop / start**) are available on the local host from the Container view.
 
 Remote hosts are added from **Settings → Add remote host**. Configuration is stored locally in your OS config directory (`~/.config/dockone/config.json` on Linux).
 

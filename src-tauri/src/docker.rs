@@ -25,6 +25,11 @@ pub fn connect(host: &Host) -> Result<Docker, String> {
 /// the connection test so an unreachable host fails fast instead of hanging.
 pub fn connect_timeout(host: &Host, timeout: u64) -> Result<Docker, String> {
     let ep = host.endpoint.trim();
+    if ep.starts_with("ssh://") {
+        // SSH hosts are resolved to a local tcp:// endpoint by the tunnel layer
+        // before reaching here.
+        return Err("host SSH gestito dal tunnel, non connettere direttamente".into());
+    }
     let docker = if ep.is_empty() || ep == "local" {
         Docker::connect_with_local_defaults()
     } else if let Some(path) = ep.strip_prefix("unix://") {
@@ -844,6 +849,51 @@ pub async fn container_config(docker: &Docker, id: &str) -> Result<DeploySpec, S
         volumes,
         restart,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Compose
+// ---------------------------------------------------------------------------
+
+/// Given a docker-compose project name, find the config files and working
+/// directory recorded on its containers' labels (so the CLI can act on it).
+pub async fn compose_meta(
+    docker: &Docker,
+    project: &str,
+) -> Result<(Vec<String>, Option<String>), String> {
+    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
+    filters.insert(
+        "label".to_string(),
+        vec![format!("com.docker.compose.project={project}")],
+    );
+    let opts = ListContainersOptions::<String> {
+        all: true,
+        filters,
+        ..Default::default()
+    };
+    let list = docker.list_containers(Some(opts)).await.map_err(err)?;
+    let c = list
+        .into_iter()
+        .next()
+        .ok_or("Nessun container trovato per questo stack")?;
+    let id = c.id.ok_or("container senza id")?;
+    let d = docker.inspect_container(&id, None).await.map_err(err)?;
+    let labels = d.config.and_then(|cfg| cfg.labels).unwrap_or_default();
+
+    let files = labels
+        .get("com.docker.compose.project.config_files")
+        .map(|s| {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let workdir = labels
+        .get("com.docker.compose.project.working_dir")
+        .cloned();
+
+    Ok((files, workdir))
 }
 
 fn parse_health(status: &str) -> String {

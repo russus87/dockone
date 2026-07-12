@@ -82,6 +82,13 @@ impl Default for PersistedData {
     }
 }
 
+/// A live SSH port-forward: the `ssh` child process plus the local endpoint
+/// (`tcp://127.0.0.1:PORT`) that bollard connects to.
+pub struct Tunnel {
+    pub child: std::process::Child,
+    pub endpoint: String,
+}
+
 /// Shared application state: persisted config + a cache of live Docker handles.
 pub struct AppState {
     pub data: Mutex<PersistedData>,
@@ -89,6 +96,8 @@ pub struct AppState {
     pub conns: Mutex<HashMap<String, Docker>>,
     /// Last seen state per `host_id/name`, used by the alerts watcher.
     pub last_states: Mutex<HashMap<String, String>>,
+    /// Active SSH tunnels keyed by host id.
+    pub tunnels: Mutex<HashMap<String, Tunnel>>,
 }
 
 impl AppState {
@@ -108,6 +117,7 @@ impl AppState {
             data: Mutex::new(data),
             conns: Mutex::new(HashMap::new()),
             last_states: Mutex::new(HashMap::new()),
+            tunnels: Mutex::new(HashMap::new()),
         }
     }
 
