@@ -2,6 +2,7 @@
   import { api, ago } from "./api";
   import type { Container, DeploySpec, Settings } from "./types";
   import DeployModal from "./DeployModal.svelte";
+  import TerminalModal from "./TerminalModal.svelte";
 
   let {
     hostId,
@@ -26,10 +27,7 @@
   let logText = $state("");
   let inspectFor = $state<Container | null>(null);
   let inspectText = $state("");
-  let execFor = $state<Container | null>(null);
-  let execCmd = $state("");
-  let execOut = $state("");
-  let execBusy = $state(false);
+  let termFor = $state<Container | null>(null);
 
   let deployOpen = $state(false);
   let deployInitial = $state<DeploySpec | null>(null);
@@ -180,21 +178,8 @@
     }
   }
 
-  function openExec(c: Container) {
-    execFor = c;
-    execCmd = "";
-    execOut = "";
-  }
-  async function runExec() {
-    if (!execFor || !execCmd.trim()) return;
-    execBusy = true;
-    try {
-      execOut = (await api.execRun(hostId, execFor.id, execCmd)) || "(nessun output)";
-    } catch (e) {
-      execOut = String(e);
-    } finally {
-      execBusy = false;
-    }
+  function openTerm(c: Container) {
+    termFor = c;
   }
 
   const filtered = $derived(
@@ -299,8 +284,7 @@
                   <button class="act danger" disabled={busy[c.id]} onclick={() => act(c, "stop")}>Stop</button>
                   <button class="act" disabled={busy[c.id]} onclick={() => act(c, "restart")}>Restart</button>
                   <button class="act" disabled={busy[c.id]} onclick={() => act(c, "pause")}>Pause</button>
-                  <button class="act danger" disabled={busy[c.id]} onclick={() => act(c, "kill")}>Kill</button>
-                  <button class="act" onclick={() => openExec(c)}>Exec</button>
+                  <button class="act primary" onclick={() => openTerm(c)}>Term</button>
                 {:else if c.state === "paused"}
                   <button class="act primary" disabled={busy[c.id]} onclick={() => act(c, "unpause")}>Unpause</button>
                 {:else}
@@ -343,23 +327,8 @@
   </div>
 {/if}
 
-{#if execFor}
-  <div class="overlay" role="presentation" onclick={() => (execFor = null)}>
-    <div class="modal" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()} style="max-width:720px">
-      <div class="modal-head">
-        <b>Exec · {execFor.name}</b>
-        <button class="icon-btn" onclick={() => (execFor = null)}>✕</button>
-      </div>
-      <div class="modal-body" style="padding:18px">
-        <div class="host-form" style="margin-top:0">
-          <input placeholder="Comando — es. ls -la /  ·  cat /etc/os-release" bind:value={execCmd} onkeydown={(e) => e.key === "Enter" && runExec()} />
-          <button class="btn" disabled={execBusy} onclick={runExec}>{execBusy ? "…" : "Esegui"}</button>
-        </div>
-        <p class="meta">Eseguito tramite <span class="mono">/bin/sh -c</span> nel container.</p>
-        {#if execOut}<pre class="logs" style="margin-top:12px;border-radius:10px">{execOut}</pre>{/if}
-      </div>
-    </div>
-  </div>
+{#if termFor}
+  <TerminalModal {hostId} container={termFor} onClose={() => (termFor = null)} />
 {/if}
 
 {#if deployOpen}

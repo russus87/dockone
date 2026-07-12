@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
 use std::sync::Mutex;
 
 use bollard::Docker;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWrite;
 
 /// A Docker endpoint the user manages — the local socket or a remote host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +92,14 @@ pub struct Tunnel {
     pub endpoint: String,
 }
 
+/// An interactive exec (terminal) session bound to a container.
+pub struct ExecSession {
+    pub input: Pin<Box<dyn AsyncWrite + Send>>,
+    pub exec_id: String,
+    pub docker: Docker,
+    pub reader: tokio::task::JoinHandle<()>,
+}
+
 /// Shared application state: persisted config + a cache of live Docker handles.
 pub struct AppState {
     pub data: Mutex<PersistedData>,
@@ -98,6 +109,10 @@ pub struct AppState {
     pub last_states: Mutex<HashMap<String, String>>,
     /// Active SSH tunnels keyed by host id.
     pub tunnels: Mutex<HashMap<String, Tunnel>>,
+    /// Live interactive terminal sessions keyed by session id.
+    pub execs: tokio::sync::Mutex<HashMap<String, ExecSession>>,
+    /// Monotonic counter for terminal session ids.
+    pub term_counter: AtomicU64,
 }
 
 impl AppState {
@@ -118,6 +133,8 @@ impl AppState {
             conns: Mutex::new(HashMap::new()),
             last_states: Mutex::new(HashMap::new()),
             tunnels: Mutex::new(HashMap::new()),
+            execs: tokio::sync::Mutex::new(HashMap::new()),
+            term_counter: AtomicU64::new(1),
         }
     }
 

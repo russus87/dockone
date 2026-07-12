@@ -34,7 +34,7 @@ DockOne is a cross-platform Docker control center built with **Rust + Tauri v2**
 - **Clone container** — duplicate any container's configuration into the deploy form in one click.
 - **Bulk actions** — start / stop / restart / remove many containers at once.
 - **Container control** — start, stop, restart, **pause, unpause, kill**.
-- **Exec** — run a command inside a running container and see its output.
+- **Interactive terminal** — a real streaming shell (xterm.js) inside any running container, with live resize and selectable shell.
 - **Alerts** — background watcher that fires a desktop notification when a container **crashes or turns unhealthy**.
 - **Health & stacks** — health status badges and docker‑compose project grouping.
 - **Test connection** — probe a host (local or remote) and see its Docker version before saving it.
@@ -44,7 +44,7 @@ DockOne is a cross-platform Docker control center built with **Rust + Tauri v2**
 - **Read‑only mode** — safe monitoring that blocks mutating actions.
 - **Dark / Light theme** — system‑grade look in both.
 
-> DockOne is designed to grow into a full infrastructure cockpit — an interactive streaming terminal, Compose up/down, scheduled tasks, metrics history and Pro integrations (Portainer, Prometheus, Grafana, Kubernetes, Proxmox…) are on the roadmap.
+> DockOne is designed to grow into a full infrastructure cockpit — scheduled tasks, metrics history, image update checks and Pro integrations (Portainer, Prometheus, Grafana, Kubernetes, Proxmox…) are on the roadmap.
 
 ## 🖥️ Connecting to hosts
 

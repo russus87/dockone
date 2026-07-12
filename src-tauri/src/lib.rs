@@ -2,16 +2,20 @@ mod docker;
 mod ssh;
 mod state;
 
+use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::Docker;
 use futures_util::future::join_all;
-use tauri::{AppHandle, Manager, State};
+use futures_util::StreamExt;
+use std::sync::atomic::Ordering;
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
+use tokio::io::AsyncWriteExt;
 
 use docker::{
     ContainerDto, DeploySpec, DfDto, EventDto, HostSummary, ImageDto, NetworkDto, PruneResult,
     StatDto, VolumeDto,
 };
-use state::{AppState, Host, PersistedData, Settings, Tunnel};
+use state::{AppState, ExecSession, Host, PersistedData, Settings, Tunnel};
 
 // ---------------------------------------------------------------------------
 // connection resolution
@@ -493,6 +497,135 @@ async fn container_config(
     docker::container_config(&docker, &id).await
 }
 
+// ---------------------------------------------------------------------------
+// interactive terminal (exec + tty)
+// ---------------------------------------------------------------------------
+
+/// Open an interactive shell in a container. Output is streamed to the
+/// frontend via `term-data-<session>` events; returns the session id.
+#[tauri::command]
+async fn term_start(
+    app: AppHandle,
+    host_id: String,
+    id: String,
+    shell: Option<String>,
+) -> Result<String, String> {
+    ensure_writable(&app.state::<AppState>())?;
+    let docker = resolve(&app.state::<AppState>(), &host_id).await?;
+    let shell = shell.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "/bin/sh".into());
+
+    let exec = docker
+        .create_exec(
+            &id,
+            CreateExecOptions {
+                attach_stdin: Some(true),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                tty: Some(true),
+                cmd: Some(vec![shell]),
+                env: Some(vec!["TERM=xterm-256color".to_string()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let exec_id = exec.id.clone();
+
+    let started = docker
+        .start_exec(
+            &exec.id,
+            Some(StartExecOptions {
+                detach: false,
+                tty: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let (mut output, input) = match started {
+        StartExecResults::Attached { output, input } => (output, input),
+        StartExecResults::Detached => return Err("sessione exec staccata".into()),
+    };
+
+    let session = {
+        let st = app.state::<AppState>();
+        format!("t{}", st.term_counter.fetch_add(1, Ordering::SeqCst))
+    };
+
+    // stream output → frontend
+    let app_r = app.clone();
+    let sess_r = session.clone();
+    let reader = tokio::spawn(async move {
+        while let Some(item) = output.next().await {
+            match item {
+                Ok(msg) => {
+                    let bytes: Vec<u8> = msg.into_bytes().to_vec();
+                    let _ = app_r.emit(&format!("term-data-{sess_r}"), bytes);
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = app_r.emit(&format!("term-exit-{sess_r}"), ());
+    });
+
+    let st = app.state::<AppState>();
+    st.execs.lock().await.insert(
+        session.clone(),
+        ExecSession {
+            input,
+            exec_id,
+            docker,
+            reader,
+        },
+    );
+    Ok(session)
+}
+
+#[tauri::command]
+async fn term_write(app: AppHandle, session: String, data: String) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    let mut map = st.execs.lock().await;
+    let s = map
+        .get_mut(&session)
+        .ok_or("sessione terminale non trovata")?;
+    s.input
+        .write_all(data.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    s.input.flush().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn term_resize(app: AppHandle, session: String, rows: u16, cols: u16) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    let (docker, exec_id) = {
+        let map = st.execs.lock().await;
+        let s = map.get(&session).ok_or("sessione terminale non trovata")?;
+        (s.docker.clone(), s.exec_id.clone())
+    };
+    docker
+        .resize_exec(
+            &exec_id,
+            ResizeExecOptions {
+                height: rows,
+                width: cols,
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn term_close(app: AppHandle, session: String) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    if let Some(s) = st.execs.lock().await.remove(&session) {
+        s.reader.abort();
+        // dropping `s` (and its input writer) closes the exec's stdin
+    }
+    Ok(())
+}
+
 /// Run a `docker compose` action on a detected stack. Local host only: the
 /// compose files live on the machine running DockOne.
 #[tauri::command]
@@ -714,6 +847,10 @@ pub fn run() {
             deploy_container,
             container_config,
             compose_action,
+            term_start,
+            term_write,
+            term_resize,
+            term_close,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
