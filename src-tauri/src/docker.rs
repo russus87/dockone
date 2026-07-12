@@ -18,26 +18,49 @@ use crate::state::Host;
 
 /// Open (or reuse the cached) connection for a host definition.
 pub fn connect(host: &Host) -> Result<Docker, String> {
+    connect_timeout(host, 120)
+}
+
+/// Like [`connect`] but with an explicit request timeout (seconds) — used by
+/// the connection test so an unreachable host fails fast instead of hanging.
+pub fn connect_timeout(host: &Host, timeout: u64) -> Result<Docker, String> {
     let ep = host.endpoint.trim();
     let docker = if ep.is_empty() || ep == "local" {
         Docker::connect_with_local_defaults()
     } else if let Some(path) = ep.strip_prefix("unix://") {
-        connect_unix(path)
+        connect_unix(path, timeout)
     } else {
         // tcp:// and http:// both speak the plain HTTP Docker API.
         let addr = ep.replace("tcp://", "http://");
-        Docker::connect_with_http(&addr, 120, bollard::API_DEFAULT_VERSION)
+        Docker::connect_with_http(&addr, timeout, bollard::API_DEFAULT_VERSION)
     };
     docker.map_err(|e| format!("connessione a «{}» fallita: {e}", host.name))
 }
 
+/// Probe a host: verify Docker answers and return a short summary string.
+pub async fn ping(host: &Host) -> Result<String, String> {
+    let docker = connect_timeout(host, 8)?;
+    let v = docker.version().await.map_err(|e| e.to_string())?;
+    let ver = v.version.unwrap_or_else(|| "?".into());
+    let api = v.api_version.unwrap_or_default();
+    let extra = match docker.info().await {
+        Ok(info) => format!(
+            " · {} container, {} immagini",
+            info.containers.unwrap_or(0),
+            info.images.unwrap_or(0)
+        ),
+        Err(_) => String::new(),
+    };
+    Ok(format!("Docker {ver} (API {api}){extra}"))
+}
+
 #[cfg(unix)]
-fn connect_unix(path: &str) -> Result<Docker, bollard::errors::Error> {
-    Docker::connect_with_unix(path, 120, bollard::API_DEFAULT_VERSION)
+fn connect_unix(path: &str, timeout: u64) -> Result<Docker, bollard::errors::Error> {
+    Docker::connect_with_unix(path, timeout, bollard::API_DEFAULT_VERSION)
 }
 
 #[cfg(not(unix))]
-fn connect_unix(_path: &str) -> Result<Docker, bollard::errors::Error> {
+fn connect_unix(_path: &str, _timeout: u64) -> Result<Docker, bollard::errors::Error> {
     // Unix domain sockets aren't available here (e.g. Windows) — fall back to
     // the platform default endpoint (named pipe on Windows).
     Docker::connect_with_local_defaults()

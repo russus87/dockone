@@ -16,6 +16,8 @@ import type {
 
 export const api = {
   listHosts: () => invoke<Host[]>("list_hosts"),
+  testHost: (name: string, endpoint: string) =>
+    invoke<string>("test_host", { name, endpoint }),
   addHost: (name: string, endpoint: string) =>
     invoke<Host[]>("add_host", { name, endpoint }),
   removeHost: (id: string) => invoke<Host[]>("remove_host", { id }),

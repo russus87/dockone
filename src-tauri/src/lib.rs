@@ -63,6 +63,32 @@ fn list_hosts(st: State<AppState>) -> Result<Vec<Host>, String> {
     Ok(st.data.lock().map_err(|_| "stato bloccato")?.hosts.clone())
 }
 
+/// Try to reach a Docker endpoint without persisting it. When a `tcp://` /
+/// `http://` endpoint has no explicit port, the default 2375 is assumed.
+#[tauri::command]
+async fn test_host(name: Option<String>, endpoint: String) -> Result<String, String> {
+    let host = Host {
+        id: "__probe__".into(),
+        name: name.unwrap_or_else(|| "test".into()),
+        endpoint: normalize_probe(&endpoint),
+        favorite: false,
+    };
+    docker::ping(&host).await
+}
+
+fn normalize_probe(ep: &str) -> String {
+    let e = ep.trim();
+    for scheme in ["tcp://", "http://"] {
+        if let Some(rest) = e.strip_prefix(scheme) {
+            // add the default plain-HTTP Docker port when none was given
+            if !rest.contains(':') && !rest.is_empty() {
+                return format!("{scheme}{rest}:2375");
+            }
+        }
+    }
+    e.to_string()
+}
+
 #[tauri::command]
 fn add_host(st: State<AppState>, name: String, endpoint: String) -> Result<Vec<Host>, String> {
     let name = name.trim().to_string();
@@ -472,6 +498,7 @@ pub fn run() {
         .manage(AppState::load())
         .invoke_handler(tauri::generate_handler![
             list_hosts,
+            test_host,
             add_host,
             remove_host,
             toggle_host_favorite,

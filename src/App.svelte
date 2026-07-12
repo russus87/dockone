@@ -28,6 +28,9 @@
   let newName = $state("");
   let newEndpoint = $state("");
   let formError = $state<string | null>(null);
+  let testing = $state(false);
+  let testMsg = $state<{ ok: boolean; text: string } | null>(null);
+  let hostTest = $state<Record<string, { ok: boolean; text: string; busy: boolean }>>({});
 
   const NAV: { id: View; label: string; ico: string }[] = [
     { id: "dashboard", label: "Dashboard", ico: "◉" },
@@ -93,12 +96,41 @@
     settings = { ...settings, alert_poll_secs: Math.max(5, v || 30) };
     await api.saveSettings(settings);
   }
+  async function testConnection() {
+    testMsg = null;
+    formError = null;
+    if (!newEndpoint.trim()) {
+      formError = "Inserisci un endpoint da testare";
+      return;
+    }
+    testing = true;
+    try {
+      const info = await api.testHost(newName, newEndpoint);
+      testMsg = { ok: true, text: info };
+    } catch (e) {
+      testMsg = { ok: false, text: String(e) };
+    } finally {
+      testing = false;
+    }
+  }
+
+  async function testHostRow(id: string, name: string, endpoint: string) {
+    hostTest = { ...hostTest, [id]: { ok: false, text: "", busy: true } };
+    try {
+      const info = await api.testHost(name, endpoint);
+      hostTest = { ...hostTest, [id]: { ok: true, text: info, busy: false } };
+    } catch (e) {
+      hostTest = { ...hostTest, [id]: { ok: false, text: String(e), busy: false } };
+    }
+  }
+
   async function addHost() {
     formError = null;
     try {
       hosts = await api.addHost(newName, newEndpoint);
       newName = "";
       newEndpoint = "";
+      testMsg = null;
     } catch (e) {
       formError = String(e);
     }
@@ -159,7 +191,7 @@
 
         <div class="side-foot">
           <b>{hosts.length}</b> host configurati<br />
-          DockOne · v0.3.0
+          DockOne · v0.3.1
         </div>
       </aside>
 
@@ -207,12 +239,20 @@
             {#each hosts as h (h.id)}
               <tr>
                 <td class="row-title">{h.favorite ? "★ " : ""}{h.name}</td>
-                <td class="mono">{h.endpoint}</td>
-                <td style="text-align:right">
+                <td class="mono">
+                  {h.endpoint}
+                  {#if hostTest[h.id] && !hostTest[h.id].busy}
+                    <div style="margin-top:4px;color:{hostTest[h.id].ok ? 'var(--green)' : 'var(--red)'}">
+                      {hostTest[h.id].ok ? "✓ " : "✗ "}{hostTest[h.id].text}
+                    </div>
+                  {/if}
+                </td>
+                <td style="text-align:right;white-space:nowrap">
+                  <button class="act" disabled={hostTest[h.id]?.busy} onclick={() => testHostRow(h.id, h.name, h.endpoint)}>
+                    {hostTest[h.id]?.busy ? "…" : "Testa"}
+                  </button>
                   {#if h.id !== "local"}
                     <button class="act danger" onclick={() => removeHost(h.id)}>Rimuovi</button>
-                  {:else}
-                    <span class="mono">socket locale</span>
                   {/if}
                 </td>
               </tr>
@@ -225,12 +265,19 @@
         <div class="host-form">
           <input placeholder="Nome (es. Production)" bind:value={newName} />
           <input placeholder="tcp://10.0.0.5:2375" bind:value={newEndpoint} />
+          <button class="btn ghost" disabled={testing} onclick={testConnection}>{testing ? "Test…" : "Testa"}</button>
           <button class="btn" onclick={addHost}>Aggiungi</button>
         </div>
+        {#if testMsg}
+          <div class={testMsg.ok ? "ok-banner" : "err-banner"} style="margin-top:10px">
+            {testMsg.ok ? "✓ Connesso · " : "✗ "}{testMsg.text}
+          </div>
+        {/if}
         <p class="meta">
           Endpoint supportati: <span class="mono">local</span>,
           <span class="mono">tcp://host:2375</span>,
           <span class="mono">unix:///path/docker.sock</span>.
+          Il test usa la porta 2375 se non la specifichi.
         </p>
 
         <div class="section-title" style="margin-top:22px">Preferenze</div>
